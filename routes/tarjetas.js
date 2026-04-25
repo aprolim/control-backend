@@ -5,6 +5,36 @@ import { protect, jefeOnly, empleadoOrJefe } from '../middleware/auth.js';
 
 const router = express.Router();
 
+// Función auxiliar para calcular progreso basado en tiempo acumulado
+const calcularProgresoPorTiempo = (tarjeta) => {
+  if (!tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado <= 0) {
+    return { porcentaje: tarjeta.porcentajeCompletado, tiempoTranscurrido: 0, tiempoRestante: 0 };
+  }
+  
+  let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+  
+  // Si está activa, sumar el tiempo desde la última reanudación
+  if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+    const ahora = new Date();
+    const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+    const segundosTranscurridos = Math.floor((ahora - inicio) / 1000);
+    const minutosTranscurridos = Math.floor(segundosTranscurridos / 60);
+    tiempoTotalTrabajado += minutosTranscurridos;
+  }
+  
+  const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado;
+  let porcentaje = Math.min(100, Math.floor((tiempoTotalTrabajado / tiempoEstimado) * 100));
+  porcentaje = Math.max(porcentaje, tarjeta.porcentajeCompletado);
+  porcentaje = Math.min(100, porcentaje);
+  const tiempoRestante = Math.max(0, tiempoEstimado - tiempoTotalTrabajado);
+  
+  return {
+    porcentaje,
+    tiempoTranscurrido: tiempoTotalTrabajado,
+    tiempoRestante
+  };
+};
+
 // Obtener todas las tarjetas del usuario
 router.get('/', protect, async (req, res) => {
   try {
@@ -69,6 +99,8 @@ router.get('/estado-empleados', protect, async (req, res) => {
       }).populate('asignadoA', 'nombre email');
       
       if (tareaJefeActiva) {
+        const { porcentaje, tiempoTranscurrido, tiempoRestante } = calcularProgresoPorTiempo(tareaJefeActiva);
+        
         jefeConTarea = {
           empleadoId: req.user._id,
           empleadoNombre: req.user.nombre,
@@ -78,29 +110,16 @@ router.get('/estado-empleados', protect, async (req, res) => {
             id: tareaJefeActiva._id,
             titulo: tareaJefeActiva.titulo,
             descripcion: tareaJefeActiva.descripcion,
-            porcentajeCompletado: tareaJefeActiva.porcentajeCompletado || 0,
+            porcentajeCompletado: porcentaje,
             tiempoEstimado: tareaJefeActiva.tiempoEstimadoEmpleado || 0,
-            tiempoTranscurrido: 0,
-            tiempoRestante: null,
+            tiempoTranscurrido: tiempoTranscurrido,
+            tiempoRestante: tiempoRestante,
             fechaInicio: tareaJefeActiva.fechaInicioReal,
             fechaEstimadaFin: tareaJefeActiva.fechaEstimadaFin,
             estadoProgreso: tareaJefeActiva.estadoProgreso,
             estado: tareaJefeActiva.estado
           }
         };
-        
-        if (tareaJefeActiva.tiempoEstimadoEmpleado > 0 && tareaJefeActiva.fechaInicioReal) {
-          const ahora = new Date();
-          const inicio = new Date(tareaJefeActiva.fechaInicioReal);
-          const segundosTranscurridos = Math.floor((ahora - inicio) / 1000);
-          const minutosTranscurridos = Math.floor(segundosTranscurridos / 60);
-          
-          jefeConTarea.tarea.tiempoTranscurrido = minutosTranscurridos;
-          jefeConTarea.tarea.tiempoRestante = Math.max(0, tareaJefeActiva.tiempoEstimadoEmpleado - minutosTranscurridos);
-          
-          const porcentajeCalculado = Math.min(100, Math.floor((minutosTranscurridos / tareaJefeActiva.tiempoEstimadoEmpleado) * 100));
-          jefeConTarea.tarea.porcentajeCompletado = Math.max(jefeConTarea.tarea.porcentajeCompletado, porcentajeCalculado);
-        }
       }
     }
     
@@ -114,23 +133,7 @@ router.get('/estado-empleados', protect, async (req, res) => {
       }).populate('asignadoA', 'nombre email');
       
       if (tareaActiva) {
-        let tiempoRestante = null;
-        let porcentajeCompletado = tareaActiva.porcentajeCompletado || 0;
-        let tiempoTranscurrido = 0;
-        let tiempoEstimado = tareaActiva.tiempoEstimadoEmpleado || 0;
-        
-        if (tiempoEstimado > 0 && tareaActiva.fechaInicioReal) {
-          const ahora = new Date();
-          const inicio = new Date(tareaActiva.fechaInicioReal);
-          const segundosTranscurridos = Math.floor((ahora - inicio) / 1000);
-          const minutosTranscurridos = Math.floor(segundosTranscurridos / 60);
-          
-          tiempoTranscurrido = minutosTranscurridos;
-          tiempoRestante = Math.max(0, tiempoEstimado - minutosTranscurridos);
-          
-          const porcentajeCalculado = Math.min(100, Math.floor((minutosTranscurridos / tiempoEstimado) * 100));
-          porcentajeCompletado = Math.max(porcentajeCompletado, porcentajeCalculado);
-        }
+        const { porcentaje, tiempoTranscurrido, tiempoRestante } = calcularProgresoPorTiempo(tareaActiva);
         
         estados.push({
           empleadoId: empleado._id,
@@ -141,8 +144,8 @@ router.get('/estado-empleados', protect, async (req, res) => {
             id: tareaActiva._id,
             titulo: tareaActiva.titulo,
             descripcion: tareaActiva.descripcion,
-            porcentajeCompletado: porcentajeCompletado,
-            tiempoEstimado: tiempoEstimado,
+            porcentajeCompletado: porcentaje,
+            tiempoEstimado: tareaActiva.tiempoEstimadoEmpleado || 0,
             tiempoTranscurrido: tiempoTranscurrido,
             tiempoRestante: tiempoRestante,
             fechaInicio: tareaActiva.fechaInicioReal,
@@ -173,27 +176,47 @@ router.get('/estado-empleados', protect, async (req, res) => {
   }
 });
 
-// Obtener progreso automático de una tarea activa (con actualización de estado al 100%)
+// Obtener progreso automático de una tarea activa (con logs detallados)
 router.get('/:id/progreso-automatico', protect, async (req, res) => {
   try {
+    console.log('========================================');
+    console.log('🔍 [PROGRESO-AUTOMATICO] Iniciando...');
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`⏰ Hora actual: ${new Date().toLocaleTimeString()}`);
+    
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
+    console.log('📋 DATOS DE LA TAREA EN BD:');
+    console.log(`   - Título: ${tarjeta.titulo}`);
+    console.log(`   - Estado: ${tarjeta.estado}`);
+    console.log(`   - EstadoProgreso: ${tarjeta.estadoProgreso}`);
+    console.log(`   - PorcentajeCompletado (BD): ${tarjeta.porcentajeCompletado}%`);
+    console.log(`   - TiempoEstimadoEmpleado: ${tarjeta.tiempoEstimadoEmpleado} min`);
+    console.log(`   - TiempoAcumulado: ${tarjeta.tiempoAcumulado || 0} min`);
+    console.log(`   - FechaInicioReal: ${tarjeta.fechaInicioReal}`);
+    console.log(`   - FechaUltimaReanudacion: ${tarjeta.fechaUltimaReanudacion}`);
+    
     // Si la tarea ya está en revisión o completada, no calcular progreso
     if (tarjeta.estado !== 'en_progreso') {
+      console.log(`⏭️ Tarea ya no está en progreso. Estado actual: ${tarjeta.estado}`);
       return res.json({
         porcentajeCalculado: tarjeta.porcentajeCompletado,
         tiempoTranscurrido: 0,
         tiempoRestante: 0,
         estaActiva: false,
-        estado: tarjeta.estado
+        estado: tarjeta.estado,
+        mensaje: tarjeta.estado === 'revision_jefe' ? 'Tarea en revisión' : ''
       });
     }
     
     // Solo calcular si la tarea está activa y tiene tiempo estimado
-    if (tarjeta.estadoProgreso !== 'activa' || !tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado <= 0) {
+    if (tarjeta.estadoProgreso !== 'activa') {
+      console.log(`⏸️ Tarea no está activa. EstadoProgreso: ${tarjeta.estadoProgreso}`);
       return res.json({
         porcentajeCalculado: tarjeta.porcentajeCompletado,
         tiempoTranscurrido: 0,
@@ -203,22 +226,60 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
       });
     }
     
-    const ahora = new Date();
-    const inicio = new Date(tarjeta.fechaInicioReal);
-    const segundosTranscurridos = Math.floor((ahora - inicio) / 1000);
-    const minutosTranscurridos = Math.floor(segundosTranscurridos / 60);
-    const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado;
+    if (!tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado <= 0) {
+      console.log(`⚠️ Tarea sin tiempo estimado: ${tarjeta.tiempoEstimadoEmpleado}`);
+      return res.json({
+        porcentajeCalculado: tarjeta.porcentajeCompletado,
+        tiempoTranscurrido: 0,
+        tiempoRestante: 0,
+        estaActiva: false,
+        estado: tarjeta.estado
+      });
+    }
     
-    let porcentajeCalculado = Math.min(100, Math.floor((minutosTranscurridos / tiempoEstimado) * 100));
+    // CALCULAR TIEMPO TRANSCURRIDO
+    let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+    let minutosDesdeReanudacion = 0;
+    let segundosDesdeReanudacion = 0;
+    
+    if (tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      segundosDesdeReanudacion = Math.floor((ahora - inicio) / 1000);
+      minutosDesdeReanudacion = Math.floor(segundosDesdeReanudacion / 60);
+      tiempoTotalTrabajado += minutosDesdeReanudacion;
+      
+      console.log('⏱️ CÁLCULO DE TIEMPO:');
+      console.log(`   - Acumulado previo: ${tarjeta.tiempoAcumulado || 0} min`);
+      console.log(`   - Segundos desde reanudación: ${segundosDesdeReanudacion} seg`);
+      console.log(`   - Minutos desde reanudación: ${minutosDesdeReanudacion} min`);
+      console.log(`   - Total trabajado: ${tiempoTotalTrabajado} min`);
+    } else {
+      console.log('⚠️ No hay fechaUltimaReanudacion, no se puede calcular tiempo transcurrido');
+    }
+    
+    const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado;
+    let porcentajeCalculado = Math.min(100, Math.floor((tiempoTotalTrabajado / tiempoEstimado) * 100));
     porcentajeCalculado = Math.max(porcentajeCalculado, tarjeta.porcentajeCompletado);
     porcentajeCalculado = Math.min(100, porcentajeCalculado);
+    const tiempoRestante = Math.max(0, tiempoEstimado - tiempoTotalTrabajado);
     
-    const tiempoRestante = Math.max(0, tiempoEstimado - minutosTranscurridos);
+    console.log('📊 RESULTADO DEL CÁLCULO:');
+    console.log(`   - Porcentaje calculado: ${porcentajeCalculado}%`);
+    console.log(`   - Tiempo restante: ${tiempoRestante} min`);
+    console.log(`   - Tiempo transcurrido: ${tiempoTotalTrabajado} min`);
+    
     let estadoActualizado = tarjeta.estado;
     let mensaje = '';
+    let tareaActualizada = null;
+    let huboCambio = false;
     
-    // ✅ SI EL PROGRESO LLEGA AL 100%, CAMBIAR A REVISIÓN
-    if (porcentajeCalculado >= 100 && tarjeta.estado === 'en_progreso') {
+    // ✅ SI EL PROGRESO LLEGA AL 100% O EL TIEMPO RESTANTE ES 0, CAMBIAR A REVISIÓN
+    if ((porcentajeCalculado >= 100 || tiempoRestante <= 0) && tarjeta.estado === 'en_progreso') {
+      console.log('🎉 ¡TIEMPO CUMPLIDO! Cambiando tarea a revisión...');
+      console.log(`   - Porcentaje: ${porcentajeCalculado}%`);
+      console.log(`   - Tiempo restante: ${tiempoRestante} min`);
+      
       estadoActualizado = 'revision_jefe';
       tarjeta.estado = 'revision_jefe';
       tarjeta.fechaCompletadaEmpleado = new Date();
@@ -226,12 +287,23 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
       tarjeta.revisionJefe = 'pendiente';
       tarjeta.fechaExpiracionRevisionJefe = new Date(Date.now() + 24 * 60 * 60 * 1000);
       tarjeta.estadoProgreso = 'completada';
+      tarjeta.porcentajeCompletado = 100;
+      huboCambio = true;
       mensaje = '✅ Tarea completada. Enviada a revisión del jefe.';
+      
+      console.log('💾 Guardando cambios en BD...');
+      await tarjeta.save();
+      console.log('✅ Cambios guardados en BD');
+      
+      tareaActualizada = await Tarjeta.findById(req.params.id)
+        .populate('asignadoA', 'nombre email')
+        .populate('asignadoPor', 'nombre');
       
       // Notificar a los jefes
       const io = req.app.get('io');
       const clients = req.app.get('clients');
       const jefes = await User.find({ rol: 'jefe', activo: true }).select('_id');
+      console.log(`📢 Notificando a ${jefes.length} jefes...`);
       jefes.forEach(jefe => {
         const socket = clients.get(jefe._id.toString());
         if (socket) {
@@ -241,27 +313,69 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
             empleadoId: req.user._id,
             empleadoNombre: req.user.nombre
           });
+          console.log(`   - Notificado a jefe: ${jefe._id}`);
         }
       });
+      
+      // Notificar al empleado
+      const socketEmpleado = clients.get(tarjeta.asignadoA?.toString());
+      if (socketEmpleado) {
+        socketEmpleado.emit('tarea-completada-automaticamente', {
+          tareaId: tarjeta._id,
+          titulo: tarjeta.titulo,
+          mensaje: '¡Tarea completada! Ha sido enviada a revisión del jefe.'
+        });
+        console.log(`   - Notificado al empleado: ${tarjeta.asignadoA}`);
+      }
+    } else if (porcentajeCalculado > tarjeta.porcentajeCompletado) {
+      console.log(`📈 Actualizando porcentaje de ${tarjeta.porcentajeCompletado}% a ${porcentajeCalculado}%`);
+      tarjeta.porcentajeCompletado = porcentajeCalculado;
+      await tarjeta.save();
+      tareaActualizada = tarjeta;
+      huboCambio = true;
+    } else {
+      console.log('⏸️ Sin cambios en el porcentaje');
+      tareaActualizada = tarjeta;
     }
     
-    // Actualizar el porcentaje en la tarea
-    tarjeta.porcentajeCompletado = porcentajeCalculado;
-    await tarjeta.save();
+    // Si hubo cambio, emitir evento de actualización general
+    if (huboCambio) {
+      console.log('📢 Emitiendo evento de actualización general...');
+      const io = req.app.get('io');
+      const clients = req.app.get('clients');
+      const todosUsuarios = await User.find({ activo: true }).select('_id');
+      todosUsuarios.forEach(usuario => {
+        const socket = clients.get(usuario._id.toString());
+        if (socket) {
+          socket.emit('estado-general-actualizado', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            estado: tarjeta.estado,
+            porcentaje: tarjeta.porcentajeCompletado
+          });
+        }
+      });
+      console.log(`   - Notificados ${todosUsuarios.length} usuarios`);
+    }
+    
+    console.log('✅ [PROGRESO-AUTOMATICO] Finalizado');
+    console.log('========================================\n');
     
     res.json({
       porcentajeCalculado,
-      tiempoTranscurrido: minutosTranscurridos,
+      tiempoTranscurrido: tiempoTotalTrabajado,
       tiempoRestante,
       estado: estadoActualizado,
       mensaje,
       estaActiva: true,
       tiempoEstimado,
       fechaInicio: tarjeta.fechaInicioReal,
-      fechaEstimadaFin: tarjeta.fechaEstimadaFin
+      fechaEstimadaFin: tarjeta.fechaEstimadaFin,
+      tarea: tareaActualizada,
+      huboCambio
     });
   } catch (error) {
-    console.error('Error en progreso-automatico:', error);
+    console.error('❌ Error en progreso-automatico:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -386,6 +500,8 @@ router.put('/:id/auto-asignar', protect, async (req, res) => {
     tarjeta.fechaInicio = new Date();
     tarjeta.fechaInicioReal = new Date();
     tarjeta.estadoProgreso = 'pausada';
+    tarjeta.tiempoAcumulado = 0;
+    tarjeta.fechaUltimaReanudacion = null;
     
     await tarjeta.save();
     await User.findByIdAndUpdate(req.user._id, {
@@ -450,6 +566,8 @@ router.put('/tomar-siguiente', protect, async (req, res) => {
     tarea.fechaInicio = new Date();
     tarea.fechaInicioReal = new Date();
     tarea.estadoProgreso = 'pausada';
+    tarea.tiempoAcumulado = 0;
+    tarea.fechaUltimaReanudacion = null;
     
     await tarea.save();
     
@@ -531,6 +649,8 @@ router.put('/:id/tomar', protect, async (req, res) => {
     tarjeta.fechaInicio = new Date();
     tarjeta.fechaInicioReal = new Date();
     tarjeta.estadoProgreso = 'pausada';
+    tarjeta.tiempoAcumulado = 0;
+    tarjeta.fechaUltimaReanudacion = null;
     
     await tarjeta.save();
     
@@ -602,6 +722,8 @@ router.put('/:id/asignar-jefe', protect, jefeOnly, async (req, res) => {
     tarjeta.estado = 'en_progreso';
     tarjeta.estadoProgreso = 'pausada';
     tarjeta.fechaInicio = new Date();
+    tarjeta.tiempoAcumulado = 0;
+    tarjeta.fechaUltimaReanudacion = null;
     
     const ultimaTarea = await Tarjeta.findOne({ 
       asignadoA: empleadoId,
@@ -684,6 +806,15 @@ router.put('/:id/progreso', protect, async (req, res) => {
     tarjeta.horasTotalesReales = Math.floor(nuevosTotalMinutos / 60);
     tarjeta.minutosTotalesReales = nuevosTotalMinutos % 60;
     
+    // Actualizar tiempo acumulado si la tarea está activa
+    if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+      tarjeta.tiempoAcumulado = (tarjeta.tiempoAcumulado || 0) + minutosDesdeReanudacion;
+      tarjeta.fechaUltimaReanudacion = ahora;
+    }
+    
     if (esHoraExtra && req.user.rol !== 'jefe') {
       tarjeta.tolerancias.push({
         fecha: new Date(),
@@ -694,8 +825,8 @@ router.put('/:id/progreso', protect, async (req, res) => {
       });
     }
     
-    // ✅ SI EL PROGRESO LLEGA AL 100%, CAMBIAR A REVISIÓN
     if (parseInt(porcentajeAvance) >= 100 && tarjeta.estado === 'en_progreso') {
+      console.log(`✅ Tarea completada por registro manual: ${tarjeta.titulo}`);
       tarjeta.fechaCompletadaEmpleado = new Date();
       tarjeta.estado = 'revision_jefe';
       tarjeta.fechaRevisionJefe = new Date();
@@ -703,7 +834,6 @@ router.put('/:id/progreso', protect, async (req, res) => {
       tarjeta.fechaExpiracionRevisionJefe = new Date(Date.now() + 24 * 60 * 60 * 1000);
       tarjeta.estadoProgreso = 'completada';
       
-      // Notificar a los jefes
       const io = req.app.get('io');
       const clients = req.app.get('clients');
       const jefes = await User.find({ rol: 'jefe', activo: true }).select('_id');
@@ -744,9 +874,7 @@ router.put('/:id/progreso', protect, async (req, res) => {
           empleadoId: req.user._id,
           empleadoNombre: req.user.nombre,
           porcentaje: tarjeta.porcentajeCompletado,
-          estado: tarjeta.estado,
-          tiempoRestante: tarjeta.tiempoEstimadoEmpleado ? 
-            Math.max(0, tarjeta.tiempoEstimadoEmpleado - ((tarjeta.horasTotalesReales * 60) + tarjeta.minutosTotalesReales)) : null
+          estado: tarjeta.estado
         });
       }
     });
@@ -833,14 +961,16 @@ router.put('/:id/iniciar', protect, async (req, res) => {
     // Pausar cualquier otra tarea activa del usuario
     await Tarjeta.updateMany(
       { asignadoA: req.user._id, estadoProgreso: 'activa', _id: { $ne: req.params.id } },
-      { estadoProgreso: 'pausada', fechaPausa: new Date() }
+      { estadoProgreso: 'pausada', fechaUltimaReanudacion: null }
     );
     
     tarjeta.tiempoEstimadoEmpleado = tiempoTotalMinutos;
     tarjeta.fechaEstimadaFin = new Date(Date.now() + tiempoTotalMinutos * 60 * 1000);
     tarjeta.fechaInicioReal = new Date();
+    tarjeta.fechaUltimaReanudacion = new Date();
     tarjeta.estadoProgreso = 'activa';
     tarjeta.estado = 'en_progreso';
+    tarjeta.tiempoAcumulado = 0;
     
     await tarjeta.save();
     
@@ -848,10 +978,8 @@ router.put('/:id/iniciar', protect, async (req, res) => {
       .populate('asignadoA', 'nombre email')
       .populate('asignadoPor', 'nombre');
     
-    console.log('✅ Tarea iniciada:', tarjetaActualizada.titulo);
-    console.log('   - estadoProgreso:', tarjetaActualizada.estadoProgreso);
+    console.log(`🚀 Tarea iniciada: ${tarjetaActualizada.titulo}`);
     
-    // Notificar a todos
     const io = req.app.get('io');
     const clients = req.app.get('clients');
     
@@ -902,9 +1030,19 @@ router.put('/:id/pausar', protect, async (req, res) => {
       return res.status(403).json({ message: 'No autorizado' });
     }
     
+    // Guardar tiempo trabajado hasta ahora
+    if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosTrabajados = Math.floor((ahora - inicio) / 1000 / 60);
+      tarjeta.tiempoAcumulado = (tarjeta.tiempoAcumulado || 0) + minutosTrabajados;
+    }
+    
     tarjeta.estadoProgreso = 'pausada';
-    tarjeta.fechaPausa = new Date();
+    tarjeta.fechaUltimaReanudacion = null;
     await tarjeta.save();
+    
+    console.log(`⏸️ Tarea pausada: ${tarjeta.titulo}`);
     
     const io = req.app.get('io');
     const clients = req.app.get('clients');
@@ -950,19 +1088,19 @@ router.put('/:id/reanudar', protect, async (req, res) => {
     // Pausar cualquier otra tarea activa del usuario
     await Tarjeta.updateMany(
       { asignadoA: req.user._id, estadoProgreso: 'activa' },
-      { estadoProgreso: 'pausada', fechaPausa: new Date() }
+      { estadoProgreso: 'pausada', fechaUltimaReanudacion: null }
     );
     
+    // Reanudar esta tarea
     tarjeta.estadoProgreso = 'activa';
-    tarjeta.fechaInicioReal = new Date();
+    tarjeta.fechaUltimaReanudacion = new Date();
     await tarjeta.save();
+    
+    console.log(`▶️ Tarea reanudada: ${tarjeta.titulo}`);
     
     const tarjetaActualizada = await Tarjeta.findById(req.params.id)
       .populate('asignadoA', 'nombre email')
       .populate('asignadoPor', 'nombre');
-    
-    console.log('✅ Tarea reanudada:', tarjetaActualizada.titulo);
-    console.log('   - estadoProgreso:', tarjetaActualizada.estadoProgreso);
     
     const io = req.app.get('io');
     const clients = req.app.get('clients');

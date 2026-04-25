@@ -80,7 +80,6 @@ const tarjetasSchema = new mongoose.Schema({
     default: 'pendiente'
   },
   
-  // ✅ CAMPO CLAVE - Estado de progreso para saber si está activa o pausada
   estadoProgreso: {
     type: String,
     enum: ['activa', 'pausada', 'pendiente', 'completada'],
@@ -92,6 +91,12 @@ const tarjetasSchema = new mongoose.Schema({
     default: 0,
     min: 0,
     max: 100
+  },
+  
+  // ✅ NUEVO CAMPO: Tiempo acumulado trabajado (en minutos)
+  tiempoAcumulado: {
+    type: Number,
+    default: 0
   },
   
   registroHoras: [registroHorasSchema],
@@ -125,6 +130,7 @@ const tarjetasSchema = new mongoose.Schema({
   
   fechaInicioReal: Date,
   fechaEstimadaFin: Date,
+  fechaUltimaReanudacion: Date, // ✅ NUEVO: Guarda cuándo se reanudó por última vez
   
   fechaLimite: Date,
   fechaInicio: Date,
