@@ -5,21 +5,35 @@ import { protect, jefeOnly, empleadoOrJefe } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// Función auxiliar para calcular progreso basado en tiempo acumulado
+// ============================================================
+// FUNCIÓN AUXILIAR: Calcular progreso por tiempo
+// ============================================================
 const calcularProgresoPorTiempo = (tarjeta) => {
+  console.log('⏱️ [CALCULAR-PROGRESO] Iniciando cálculo...');
+  console.log(`   - Tarea: ${tarjeta.titulo}`);
+  console.log(`   - EstadoProgreso: ${tarjeta.estadoProgreso}`);
+  console.log(`   - TiempoEstimado: ${tarjeta.tiempoEstimadoEmpleado}`);
+  console.log(`   - TiempoAcumulado: ${tarjeta.tiempoAcumulado || 0}`);
+  console.log(`   - FechaUltimaReanudacion: ${tarjeta.fechaUltimaReanudacion}`);
+  
   if (!tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado <= 0) {
-    return { porcentaje: tarjeta.porcentajeCompletado, tiempoTranscurrido: 0, tiempoRestante: 0 };
+    console.log('   ⚠️ Sin tiempo estimado, retornando progreso actual');
+    return {
+      porcentaje: tarjeta.porcentajeCompletado,
+      tiempoTranscurrido: 0,
+      tiempoRestante: 0
+    };
   }
   
   let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+  let minutosDesdeReanudacion = 0;
   
-  // Si está activa, sumar el tiempo desde la última reanudación
   if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
     const ahora = new Date();
     const inicio = new Date(tarjeta.fechaUltimaReanudacion);
-    const segundosTranscurridos = Math.floor((ahora - inicio) / 1000);
-    const minutosTranscurridos = Math.floor(segundosTranscurridos / 60);
-    tiempoTotalTrabajado += minutosTranscurridos;
+    minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+    tiempoTotalTrabajado += minutosDesdeReanudacion;
+    console.log(`   - Minutos desde reanudación: ${minutosDesdeReanudacion}`);
   }
   
   const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado;
@@ -28,6 +42,11 @@ const calcularProgresoPorTiempo = (tarjeta) => {
   porcentaje = Math.min(100, porcentaje);
   const tiempoRestante = Math.max(0, tiempoEstimado - tiempoTotalTrabajado);
   
+  console.log(`   📊 RESULTADO:`);
+  console.log(`   - Porcentaje: ${porcentaje}%`);
+  console.log(`   - TiempoTotalTrabajado: ${tiempoTotalTrabajado} min`);
+  console.log(`   - TiempoRestante: ${tiempoRestante} min`);
+  
   return {
     porcentaje,
     tiempoTranscurrido: tiempoTotalTrabajado,
@@ -35,32 +54,66 @@ const calcularProgresoPorTiempo = (tarjeta) => {
   };
 };
 
-// Obtener todas las tarjetas del usuario
+// ============================================================
+// GET: Obtener todas las tarjetas del usuario
+// ============================================================
 router.get('/', protect, async (req, res) => {
   try {
+    console.log('========================================');
+    console.log('📋 [GET-TARJETAS] Solicitando tarjetas...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`🆔 ID: ${req.user._id}`);
+    
     let query = {};
     
     if (req.user.rol === 'empleado') {
+      console.log('   🔍 Filtro: empleado -> asignadoA');
       query = { asignadoA: req.user._id };
+    } else if (req.user.rol === 'jefe') {
+      console.log('   🔍 Filtro: jefe -> TODAS las tareas');
+      query = {};
     } else if (req.user.rol === 'cliente') {
-      query = { 'clienteInfo.userId': req.user._id };
+      console.log('   🔍 Filtro: cliente -> clienteInfo.userId O asignadoA');
+      query = {
+        $or: [
+          { 'clienteInfo.userId': req.user._id },
+          { asignadoA: req.user._id }
+        ]
+      };
     }
+    
+    console.log(`   📝 Query: ${JSON.stringify(query)}`);
     
     const tarjetas = await Tarjeta.find(query)
       .populate('asignadoA', 'nombre email')
       .populate('asignadoPor', 'nombre')
       .sort('-createdAt');
     
+    console.log(`   ✅ Encontradas ${tarjetas.length} tarjetas`);
+    if (tarjetas.length > 0) {
+      tarjetas.forEach(t => {
+        console.log(`      - ${t.titulo} (${t.estado}) - asignadoA: ${t.asignadoA?.nombre || 'N/A'}`);
+      });
+    }
+    console.log('========================================\n');
+    
     res.json(tarjetas);
   } catch (error) {
+    console.error('❌ Error en GET /tarjetas:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Obtener tareas disponibles para tomar (solo empleados y jefes)
+// ============================================================
+// GET: Tareas disponibles para tomar
+// ============================================================
 router.get('/disponibles', protect, async (req, res) => {
   try {
+    console.log('📋 [GET-DISPONIBLES] Buscando tareas disponibles...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('   ❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
@@ -72,16 +125,24 @@ router.get('/disponibles', protect, async (req, res) => {
       .sort({ prioridad: -1, createdAt: 1 })
       .limit(20);
     
+    console.log(`   ✅ Encontradas ${tareasDisponibles.length} tareas disponibles`);
     res.json(tareasDisponibles);
   } catch (error) {
+    console.error('❌ Error en GET /disponibles:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Obtener estado en tiempo real de todos los empleados
+// ============================================================
+// GET: Estado de empleados en tiempo real
+// ============================================================
 router.get('/estado-empleados', protect, async (req, res) => {
   try {
+    console.log('👥 [ESTADO-EMPLEADOS] Solicitando estado...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    
     if (req.user.rol === 'cliente') {
+      console.log('   ❌ Cliente no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
@@ -89,6 +150,8 @@ router.get('/estado-empleados', protect, async (req, res) => {
       rol: 'empleado', 
       activo: true 
     }).select('nombre email');
+    
+    console.log(`   👷 Empleados encontrados: ${empleadosConTareas.length}`);
     
     let jefeConTarea = null;
     if (req.user.rol === 'jefe') {
@@ -120,6 +183,7 @@ router.get('/estado-empleados', protect, async (req, res) => {
             estado: tareaJefeActiva.estado
           }
         };
+        console.log(`   👔 Jefe tiene tarea activa: ${tareaJefeActiva.titulo}`);
       }
     }
     
@@ -154,6 +218,7 @@ router.get('/estado-empleados', protect, async (req, res) => {
             estado: tareaActiva.estado
           }
         });
+        console.log(`   👷 ${empleado.nombre}: tarea activa - ${tareaActiva.titulo}`);
       } else {
         estados.push({
           empleadoId: empleado._id,
@@ -162,6 +227,7 @@ router.get('/estado-empleados', protect, async (req, res) => {
           rol: 'empleado',
           tarea: null
         });
+        console.log(`   👷 ${empleado.nombre}: sin tarea activa`);
       }
     }
     
@@ -169,21 +235,23 @@ router.get('/estado-empleados', protect, async (req, res) => {
       estados.push(jefeConTarea);
     }
     
+    console.log(`   ✅ Estado generado: ${estados.length} empleados`);
     res.json(estados);
   } catch (error) {
-    console.error('Error en estado-empleados:', error);
+    console.error('❌ Error en estado-empleados:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Obtener progreso automático de una tarea activa (con logs detallados)
+// ============================================================
+// GET: Progreso automático de tarea activa
+// ============================================================
 router.get('/:id/progreso-automatico', protect, async (req, res) => {
   try {
     console.log('========================================');
     console.log('🔍 [PROGRESO-AUTOMATICO] Iniciando...');
     console.log(`📌 Tarea ID: ${req.params.id}`);
     console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
-    console.log(`⏰ Hora actual: ${new Date().toLocaleTimeString()}`);
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
@@ -191,19 +259,15 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
-    console.log('📋 DATOS DE LA TAREA EN BD:');
-    console.log(`   - Título: ${tarjeta.titulo}`);
+    console.log(`📋 Tarea: ${tarjeta.titulo}`);
     console.log(`   - Estado: ${tarjeta.estado}`);
     console.log(`   - EstadoProgreso: ${tarjeta.estadoProgreso}`);
-    console.log(`   - PorcentajeCompletado (BD): ${tarjeta.porcentajeCompletado}%`);
-    console.log(`   - TiempoEstimadoEmpleado: ${tarjeta.tiempoEstimadoEmpleado} min`);
+    console.log(`   - Porcentaje: ${tarjeta.porcentajeCompletado}%`);
+    console.log(`   - TiempoEstimado: ${tarjeta.tiempoEstimadoEmpleado} min`);
     console.log(`   - TiempoAcumulado: ${tarjeta.tiempoAcumulado || 0} min`);
-    console.log(`   - FechaInicioReal: ${tarjeta.fechaInicioReal}`);
-    console.log(`   - FechaUltimaReanudacion: ${tarjeta.fechaUltimaReanudacion}`);
     
-    // Si la tarea ya está en revisión o completada, no calcular progreso
     if (tarjeta.estado !== 'en_progreso') {
-      console.log(`⏭️ Tarea ya no está en progreso. Estado actual: ${tarjeta.estado}`);
+      console.log(`   ⏭️ Tarea no está en progreso (${tarjeta.estado})`);
       return res.json({
         porcentajeCalculado: tarjeta.porcentajeCompletado,
         tiempoTranscurrido: 0,
@@ -214,9 +278,8 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
       });
     }
     
-    // Solo calcular si la tarea está activa y tiene tiempo estimado
     if (tarjeta.estadoProgreso !== 'activa') {
-      console.log(`⏸️ Tarea no está activa. EstadoProgreso: ${tarjeta.estadoProgreso}`);
+      console.log(`   ⏸️ Tarea no está activa (${tarjeta.estadoProgreso})`);
       return res.json({
         porcentajeCalculado: tarjeta.porcentajeCompletado,
         tiempoTranscurrido: 0,
@@ -227,7 +290,7 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
     }
     
     if (!tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado <= 0) {
-      console.log(`⚠️ Tarea sin tiempo estimado: ${tarjeta.tiempoEstimadoEmpleado}`);
+      console.log('   ⚠️ Sin tiempo estimado');
       return res.json({
         porcentajeCalculado: tarjeta.porcentajeCompletado,
         tiempoTranscurrido: 0,
@@ -237,25 +300,15 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
       });
     }
     
-    // CALCULAR TIEMPO TRANSCURRIDO
     let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
     let minutosDesdeReanudacion = 0;
-    let segundosDesdeReanudacion = 0;
     
     if (tarjeta.fechaUltimaReanudacion) {
       const ahora = new Date();
       const inicio = new Date(tarjeta.fechaUltimaReanudacion);
-      segundosDesdeReanudacion = Math.floor((ahora - inicio) / 1000);
-      minutosDesdeReanudacion = Math.floor(segundosDesdeReanudacion / 60);
+      minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
       tiempoTotalTrabajado += minutosDesdeReanudacion;
-      
-      console.log('⏱️ CÁLCULO DE TIEMPO:');
-      console.log(`   - Acumulado previo: ${tarjeta.tiempoAcumulado || 0} min`);
-      console.log(`   - Segundos desde reanudación: ${segundosDesdeReanudacion} seg`);
-      console.log(`   - Minutos desde reanudación: ${minutosDesdeReanudacion} min`);
-      console.log(`   - Total trabajado: ${tiempoTotalTrabajado} min`);
-    } else {
-      console.log('⚠️ No hay fechaUltimaReanudacion, no se puede calcular tiempo transcurrido');
+      console.log(`⏱️ Tiempo desde reanudación: ${minutosDesdeReanudacion} min`);
     }
     
     const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado;
@@ -264,21 +317,17 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
     porcentajeCalculado = Math.min(100, porcentajeCalculado);
     const tiempoRestante = Math.max(0, tiempoEstimado - tiempoTotalTrabajado);
     
-    console.log('📊 RESULTADO DEL CÁLCULO:');
+    console.log(`📊 RESULTADO:`);
     console.log(`   - Porcentaje calculado: ${porcentajeCalculado}%`);
     console.log(`   - Tiempo restante: ${tiempoRestante} min`);
-    console.log(`   - Tiempo transcurrido: ${tiempoTotalTrabajado} min`);
     
     let estadoActualizado = tarjeta.estado;
     let mensaje = '';
     let tareaActualizada = null;
     let huboCambio = false;
     
-    // ✅ SI EL PROGRESO LLEGA AL 100% O EL TIEMPO RESTANTE ES 0, CAMBIAR A REVISIÓN
     if ((porcentajeCalculado >= 100 || tiempoRestante <= 0) && tarjeta.estado === 'en_progreso') {
-      console.log('🎉 ¡TIEMPO CUMPLIDO! Cambiando tarea a revisión...');
-      console.log(`   - Porcentaje: ${porcentajeCalculado}%`);
-      console.log(`   - Tiempo restante: ${tiempoRestante} min`);
+      console.log('🎉 ¡TIEMPO CUMPLIDO! Cambiando a revisión...');
       
       estadoActualizado = 'revision_jefe';
       tarjeta.estado = 'revision_jefe';
@@ -291,15 +340,8 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
       huboCambio = true;
       mensaje = '✅ Tarea completada. Enviada a revisión del jefe.';
       
-      console.log('💾 Guardando cambios en BD...');
       await tarjeta.save();
-      console.log('✅ Cambios guardados en BD');
       
-      tareaActualizada = await Tarjeta.findById(req.params.id)
-        .populate('asignadoA', 'nombre email')
-        .populate('asignadoPor', 'nombre');
-      
-      // Notificar a los jefes
       const io = req.app.get('io');
       const clients = req.app.get('clients');
       const jefes = await User.find({ rol: 'jefe', activo: true }).select('_id');
@@ -313,11 +355,9 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
             empleadoId: req.user._id,
             empleadoNombre: req.user.nombre
           });
-          console.log(`   - Notificado a jefe: ${jefe._id}`);
         }
       });
       
-      // Notificar al empleado
       const socketEmpleado = clients.get(tarjeta.asignadoA?.toString());
       if (socketEmpleado) {
         socketEmpleado.emit('tarea-completada-automaticamente', {
@@ -325,10 +365,9 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
           titulo: tarjeta.titulo,
           mensaje: '¡Tarea completada! Ha sido enviada a revisión del jefe.'
         });
-        console.log(`   - Notificado al empleado: ${tarjeta.asignadoA}`);
       }
     } else if (porcentajeCalculado > tarjeta.porcentajeCompletado) {
-      console.log(`📈 Actualizando porcentaje de ${tarjeta.porcentajeCompletado}% a ${porcentajeCalculado}%`);
+      console.log(`📈 Actualizando porcentaje: ${tarjeta.porcentajeCompletado}% → ${porcentajeCalculado}%`);
       tarjeta.porcentajeCompletado = porcentajeCalculado;
       await tarjeta.save();
       tareaActualizada = tarjeta;
@@ -338,7 +377,6 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
       tareaActualizada = tarjeta;
     }
     
-    // Si hubo cambio, emitir evento de actualización general
     if (huboCambio) {
       console.log('📢 Emitiendo evento de actualización general...');
       const io = req.app.get('io');
@@ -355,7 +393,6 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
           });
         }
       });
-      console.log(`   - Notificados ${todosUsuarios.length} usuarios`);
     }
     
     console.log('✅ [PROGRESO-AUTOMATICO] Finalizado');
@@ -380,26 +417,39 @@ router.get('/:id/progreso-automatico', protect, async (req, res) => {
   }
 });
 
-// Obtener una tarjeta específica
+// ============================================================
+// GET: Obtener una tarjeta específica
+// ============================================================
 router.get('/:id', protect, async (req, res) => {
   try {
+    console.log(`📋 [GET-TARJETA] Solicitando tarea: ${req.params.id}`);
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    
     const tarjeta = await Tarjeta.findById(req.params.id)
       .populate('asignadoA', 'nombre email')
       .populate('asignadoPor', 'nombre');
     
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
+    console.log(`✅ Tarea encontrada: ${tarjeta.titulo}`);
     res.json(tarjeta);
   } catch (error) {
+    console.error('❌ Error en GET /:id:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Crear solicitud de cliente
+// ============================================================
+// POST: Crear solicitud de cliente
+// ============================================================
 router.post('/', protect, async (req, res) => {
   try {
+    console.log('📝 [POST-TARJETA] Creando solicitud...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    
     const { titulo, descripcion, horasEstimadas, clienteInfo } = req.body;
     
     const solicitud = await Tarjeta.create({
@@ -418,6 +468,8 @@ router.post('/', protect, async (req, res) => {
       estado: 'pendiente'
     });
     
+    console.log(`✅ Solicitud creada: ${solicitud.titulo} (ID: ${solicitud._id})`);
+    
     const io = req.app.get('io');
     const clients = req.app.get('clients');
     
@@ -426,6 +478,7 @@ router.post('/', protect, async (req, res) => {
       activo: true 
     }).select('_id');
     
+    console.log(`📢 Notificando a ${usuarios.length} usuarios...`);
     usuarios.forEach(usuario => {
       const socket = clients.get(usuario._id.toString());
       if (socket) {
@@ -438,14 +491,21 @@ router.post('/', protect, async (req, res) => {
     
     res.status(201).json(solicitud);
   } catch (error) {
+    console.error('❌ Error en POST /:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Crear tarea extra
+// ============================================================
+// POST: Crear tarea extra
+// ============================================================
 router.post('/tarea-extra', protect, async (req, res) => {
   try {
+    console.log('📝 [POST-TAREA-EXTRA] Creando tarea extra...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado para crear tarea extra');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
@@ -470,26 +530,37 @@ router.post('/tarea-extra', protect, async (req, res) => {
       $push: { tareasActivas: tareaExtra._id }
     });
     
+    console.log(`✅ Tarea extra creada: ${tareaExtra.titulo} (ID: ${tareaExtra._id})`);
     res.status(201).json(tareaExtra);
   } catch (error) {
+    console.error('❌ Error en POST /tarea-extra:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Auto-asignar tarea
+// ============================================================
+// PUT: Auto-asignar tarea
+// ============================================================
 router.put('/:id/auto-asignar', protect, async (req, res) => {
   try {
+    console.log('🎯 [AUTO-ASIGNAR] Iniciando...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.asignadoA) {
+      console.log(`❌ Tarea ya asignada a: ${tarjeta.asignadoA}`);
       return res.status(400).json({ message: 'Tarea ya asignada' });
     }
     
@@ -507,6 +578,8 @@ router.put('/:id/auto-asignar', protect, async (req, res) => {
     await User.findByIdAndUpdate(req.user._id, {
       $push: { tareasActivas: tarjeta._id }
     });
+    
+    console.log(`✅ Tarea auto-asignada a ${req.user.email}`);
     
     const tareaActualizada = await Tarjeta.findById(tarjeta._id)
       .populate('asignadoA', 'nombre email')
@@ -538,14 +611,21 @@ router.put('/:id/auto-asignar', protect, async (req, res) => {
     
     res.json(tareaActualizada);
   } catch (error) {
+    console.error('❌ Error en auto-asignar:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Tomar siguiente tarea disponible
+// ============================================================
+// PUT: Tomar siguiente tarea disponible
+// ============================================================
 router.put('/tomar-siguiente', protect, async (req, res) => {
   try {
+    console.log('🎯 [TOMAR-SIGUIENTE] Iniciando...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
@@ -556,8 +636,11 @@ router.put('/tomar-siguiente', protect, async (req, res) => {
     }).sort({ prioridad: -1, createdAt: 1 });
     
     if (!tarea) {
+      console.log('❌ No hay tareas disponibles');
       return res.status(404).json({ message: 'No hay tareas disponibles' });
     }
+    
+    console.log(`✅ Tarea encontrada: ${tarea.titulo}`);
     
     tarea.asignadoA = req.user._id;
     tarea.asignadoPor = req.user._id;
@@ -617,28 +700,39 @@ router.put('/tomar-siguiente', protect, async (req, res) => {
       message: 'Tarea asignada exitosamente'
     });
   } catch (error) {
+    console.error('❌ Error en tomar-siguiente:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Tomar una tarea específica
+// ============================================================
+// PUT: Tomar una tarea específica
+// ============================================================
 router.put('/:id/tomar', protect, async (req, res) => {
   try {
+    console.log('🎯 [TOMAR-ESPECIFICA] Iniciando...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.asignadoA) {
+      console.log(`❌ Tarea ya asignada a: ${tarjeta.asignadoA}`);
       return res.status(400).json({ message: 'Tarea ya asignada' });
     }
     
     if (tarjeta.estado !== 'pendiente') {
+      console.log(`❌ Tarea no está pendiente (${tarjeta.estado})`);
       return res.status(400).json({ message: 'La tarea no está disponible' });
     }
     
@@ -657,6 +751,8 @@ router.put('/:id/tomar', protect, async (req, res) => {
     await User.findByIdAndUpdate(req.user._id, {
       $push: { tareasActivas: tarjeta._id }
     });
+    
+    console.log(`✅ Tarea asignada a ${req.user.email}`);
     
     const tareaActualizada = await Tarjeta.findById(tarjeta._id)
       .populate('asignadoA', 'nombre email')
@@ -700,20 +796,46 @@ router.put('/:id/tomar', protect, async (req, res) => {
       message: 'Tarea asignada exitosamente'
     });
   } catch (error) {
+    console.error('❌ Error en tomar específica:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Asignar por jefe
+// ============================================================
+// PUT: Asignar por jefe (CON VALIDACIÓN DE ROL)
+// ============================================================
 router.put('/:id/asignar-jefe', protect, jefeOnly, async (req, res) => {
   try {
+    console.log('========================================');
+    console.log('👔 [ASIGNAR-JEFE] Asignando tarea...');
+    console.log(`👤 Jefe: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    console.log(`📌 Empleado ID: ${req.body.empleadoId}`);
+    console.log(`⏱️ Tiempo sugerido: ${req.body.tiempoSugeridoHoras}h ${req.body.tiempoSugeridoMinutos}min`);
+    
     const { empleadoId, tiempoSugeridoHoras, tiempoSugeridoMinutos } = req.body;
     
     const tarjeta = await Tarjeta.findById(req.params.id);
-    const empleado = await User.findById(empleadoId);
+    if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
     
-    if (!tarjeta || !empleado) {
-      return res.status(404).json({ message: 'Tarea o empleado no encontrado' });
+    const empleado = await User.findById(empleadoId);
+    if (!empleado) {
+      console.log('❌ Empleado no encontrado');
+      return res.status(404).json({ message: 'Empleado no encontrado' });
+    }
+    
+    console.log(`   📋 Empleado encontrado: ${empleado.email} (${empleado.rol})`);
+    
+    // 🔥 VALIDAR que el usuario sea empleado
+    if (empleado.rol !== 'empleado') {
+      console.log(`❌ El usuario ${empleado.email} no es empleado (es ${empleado.rol})`);
+      return res.status(400).json({ 
+        success: false,
+        message: `El usuario "${empleado.nombre}" no es un empleado. Solo se pueden asignar tareas a empleados.`
+      });
     }
     
     tarjeta.asignadoA = empleadoId;
@@ -725,23 +847,20 @@ router.put('/:id/asignar-jefe', protect, jefeOnly, async (req, res) => {
     tarjeta.tiempoAcumulado = 0;
     tarjeta.fechaUltimaReanudacion = null;
     
-    const ultimaTarea = await Tarjeta.findOne({ 
-      asignadoA: empleadoId,
-      estado: 'en_progreso'
-    }).sort({ ordenCola: -1 });
-    
-    tarjeta.ordenCola = (ultimaTarea?.ordenCola || 0) + 1;
-    
     if (tiempoSugeridoHoras || tiempoSugeridoMinutos) {
       const horas = Math.min(23, Math.max(0, parseInt(tiempoSugeridoHoras) || 0));
       const minutos = Math.min(59, Math.max(0, parseInt(tiempoSugeridoMinutos) || 0));
       tarjeta.tiempoSugeridoJefe = (horas * 60) + minutos;
+      console.log(`   ⏱️ Tiempo sugerido: ${tarjeta.tiempoSugeridoJefe} min`);
     }
     
     await tarjeta.save();
+    
     await User.findByIdAndUpdate(empleadoId, {
       $push: { tareasActivas: tarjeta._id }
     });
+    
+    console.log(`✅ Tarea asignada exitosamente a ${empleado.email}`);
     
     const tarjetaActualizada = await Tarjeta.findById(req.params.id)
       .populate('asignadoA', 'nombre email')
@@ -751,22 +870,41 @@ router.put('/:id/asignar-jefe', protect, jefeOnly, async (req, res) => {
     const clients = req.app.get('clients');
     const socket = clients.get(empleadoId);
     if (socket) {
+      console.log(`📢 Notificando al empleado ${empleado.email}...`);
       socket.emit('nueva-tarea-asignada', {
         tarea: tarjetaActualizada,
         mensaje: `Nueva tarea asignada: ${tarjetaActualizada.titulo}`
       });
     }
     
-    res.json(tarjetaActualizada);
+    console.log('✅ [ASIGNAR-JEFE] Finalizado');
+    console.log('========================================\n');
+    
+    res.json({ 
+      success: true, 
+      message: 'Tarea asignada exitosamente',
+      tarea: tarjetaActualizada 
+    });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('❌ Error en asignar-jefe:', error);
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
   }
 });
 
-// Registrar progreso
+// ============================================================
+// PUT: Registrar progreso
+// ============================================================
 router.put('/:id/progreso', protect, async (req, res) => {
   try {
+    console.log('📊 [PROGRESO] Registrando progreso...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
@@ -776,10 +914,12 @@ router.put('/:id/progreso', protect, async (req, res) => {
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.asignadoA?.toString() !== req.user._id.toString()) {
+      console.log(`❌ Usuario no es el asignado: ${tarjeta.asignadoA} vs ${req.user._id}`);
       return res.status(403).json({ message: 'No autorizado' });
     }
     
@@ -806,7 +946,6 @@ router.put('/:id/progreso', protect, async (req, res) => {
     tarjeta.horasTotalesReales = Math.floor(nuevosTotalMinutos / 60);
     tarjeta.minutosTotalesReales = nuevosTotalMinutos % 60;
     
-    // Actualizar tiempo acumulado si la tarea está activa
     if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
       const ahora = new Date();
       const inicio = new Date(tarjeta.fechaUltimaReanudacion);
@@ -858,6 +997,8 @@ router.put('/:id/progreso', protect, async (req, res) => {
     
     await tarjeta.save();
     
+    console.log(`✅ Progreso registrado: ${porcentajeAvance}%`);
+    
     const io = req.app.get('io');
     const clients = req.app.get('clients');
     
@@ -881,36 +1022,56 @@ router.put('/:id/progreso', protect, async (req, res) => {
     
     res.json({ success: true, tarjeta });
   } catch (error) {
+    console.error('❌ Error en progreso:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Establecer tiempo estimado
+// ============================================================
+// PUT: Establecer tiempo estimado
+// ============================================================
 router.put('/:id/tiempo-estimado', protect, async (req, res) => {
   try {
+    console.log('⏱️ [TIEMPO-ESTIMADO] Estableciendo tiempo...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
     const { tiempoEstimadoHoras, tiempoEstimadoMinutos } = req.body;
     
-    const horas = Math.min(23, Math.max(0, parseInt(tiempoEstimadoHoras) || 0));
-    const minutos = Math.min(59, Math.max(0, parseInt(tiempoEstimadoMinutos) || 0));
+    const horas = Math.min(999, Math.max(0, parseInt(tiempoEstimadoHoras) || 0));
+    const minutos = Math.min(999, Math.max(0, parseInt(tiempoEstimadoMinutos) || 0));
     const tiempoTotalMinutos = (horas * 60) + minutos;
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.asignadoA?.toString() !== req.user._id.toString()) {
+      console.log(`❌ Usuario no es el asignado: ${tarjeta.asignadoA} vs ${req.user._id}`);
       return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    // ✅ Solo permitir establecer tiempo si NO tiene tiempo estimado aún
+    if (tarjeta.tiempoEstimadoEmpleado > 0) {
+      console.log('❌ Ya tiene tiempo estimado establecido');
+      return res.status(400).json({ 
+        message: 'Ya tienes un tiempo estimado establecido. No puedes modificarlo después de iniciar la tarea.' 
+      });
     }
     
     tarjeta.tiempoEstimadoEmpleado = tiempoTotalMinutos;
     tarjeta.fechaEstimadaFin = new Date(Date.now() + tiempoTotalMinutos * 60 * 1000);
     
     await tarjeta.save();
+    
+    console.log(`✅ Tiempo estimado establecido: ${tiempoTotalMinutos} min`);
     
     const io = req.app.get('io');
     const clients = req.app.get('clients');
@@ -935,14 +1096,22 @@ router.put('/:id/tiempo-estimado', protect, async (req, res) => {
     
     res.json({ success: true, tarjeta });
   } catch (error) {
+    console.error('❌ Error en tiempo-estimado:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Iniciar tarea
+// ============================================================
+// PUT: Iniciar tarea
+// ============================================================
 router.put('/:id/iniciar', protect, async (req, res) => {
   try {
+    console.log('🚀 [INICIAR] Iniciando tarea...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
@@ -951,11 +1120,21 @@ router.put('/:id/iniciar', protect, async (req, res) => {
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.asignadoA?.toString() !== req.user._id.toString()) {
+      console.log(`❌ Usuario no es el asignado: ${tarjeta.asignadoA} vs ${req.user._id}`);
       return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    // ✅ Verificar que tenga tiempo estimado
+    if (tarjeta.tiempoEstimadoEmpleado === 0) {
+      console.log('❌ No tiene tiempo estimado');
+      return res.status(400).json({ 
+        message: 'Debes establecer un tiempo estimado antes de iniciar la tarea.' 
+      });
     }
     
     // Pausar cualquier otra tarea activa del usuario
@@ -964,21 +1143,18 @@ router.put('/:id/iniciar', protect, async (req, res) => {
       { estadoProgreso: 'pausada', fechaUltimaReanudacion: null }
     );
     
-    tarjeta.tiempoEstimadoEmpleado = tiempoTotalMinutos;
-    tarjeta.fechaEstimadaFin = new Date(Date.now() + tiempoTotalMinutos * 60 * 1000);
     tarjeta.fechaInicioReal = new Date();
     tarjeta.fechaUltimaReanudacion = new Date();
     tarjeta.estadoProgreso = 'activa';
     tarjeta.estado = 'en_progreso';
-    tarjeta.tiempoAcumulado = 0;
     
     await tarjeta.save();
+    
+    console.log(`✅ Tarea iniciada: ${tarjeta.titulo}`);
     
     const tarjetaActualizada = await Tarjeta.findById(req.params.id)
       .populate('asignadoA', 'nombre email')
       .populate('asignadoPor', 'nombre');
-    
-    console.log(`🚀 Tarea iniciada: ${tarjetaActualizada.titulo}`);
     
     const io = req.app.get('io');
     const clients = req.app.get('clients');
@@ -995,7 +1171,7 @@ router.put('/:id/iniciar', protect, async (req, res) => {
           tarea: {
             id: tarjeta._id,
             titulo: tarjeta.titulo,
-            tiempoEstimado: tiempoTotalMinutos,
+            tiempoEstimado: tarjeta.tiempoEstimadoEmpleado,
             fechaEstimadaFin: tarjeta.fechaEstimadaFin
           },
           empleado: {
@@ -1009,40 +1185,49 @@ router.put('/:id/iniciar', protect, async (req, res) => {
     
     res.json(tarjetaActualizada);
   } catch (error) {
-    console.error('❌ Error en iniciar tarea:', error);
+    console.error('❌ Error en iniciar:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Pausar tarea
+// ============================================================
+// PUT: Pausar tarea
+// ============================================================
 router.put('/:id/pausar', protect, async (req, res) => {
   try {
+    console.log('⏸️ [PAUSAR] Pausando tarea...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.asignadoA?.toString() !== req.user._id.toString()) {
+      console.log(`❌ Usuario no es el asignado: ${tarjeta.asignadoA} vs ${req.user._id}`);
       return res.status(403).json({ message: 'No autorizado' });
     }
     
-    // Guardar tiempo trabajado hasta ahora
     if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
       const ahora = new Date();
       const inicio = new Date(tarjeta.fechaUltimaReanudacion);
       const minutosTrabajados = Math.floor((ahora - inicio) / 1000 / 60);
       tarjeta.tiempoAcumulado = (tarjeta.tiempoAcumulado || 0) + minutosTrabajados;
+      console.log(`   ⏱️ Tiempo trabajado en esta sesión: ${minutosTrabajados} min`);
     }
     
     tarjeta.estadoProgreso = 'pausada';
     tarjeta.fechaUltimaReanudacion = null;
     await tarjeta.save();
     
-    console.log(`⏸️ Tarea pausada: ${tarjeta.titulo}`);
+    console.log(`✅ Tarea pausada: ${tarjeta.titulo}`);
     
     const io = req.app.get('io');
     const clients = req.app.get('clients');
@@ -1065,38 +1250,53 @@ router.put('/:id/pausar', protect, async (req, res) => {
     
     res.json({ success: true, tarjeta });
   } catch (error) {
+    console.error('❌ Error en pausar:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Reanudar tarea
+// ============================================================
+// PUT: Reanudar tarea
+// ============================================================
 router.put('/:id/reanudar', protect, async (req, res) => {
   try {
+    console.log('▶️ [REANUDAR] Reanudando tarea...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     if (req.user.rol !== 'empleado' && req.user.rol !== 'jefe') {
+      console.log('❌ Usuario no autorizado');
       return res.status(403).json({ message: 'No autorizado' });
     }
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.asignadoA?.toString() !== req.user._id.toString()) {
+      console.log(`❌ Usuario no es el asignado: ${tarjeta.asignadoA} vs ${req.user._id}`);
       return res.status(403).json({ message: 'No autorizado' });
     }
     
-    // Pausar cualquier otra tarea activa del usuario
+    if (tarjeta.tiempoEstimadoEmpleado === 0) {
+      console.log('⚠️ Tarea sin tiempo estimado, no se puede reanudar');
+      return res.status(400).json({ 
+        message: 'Debes establecer un tiempo estimado antes de reanudar' 
+      });
+    }
+    
     await Tarjeta.updateMany(
       { asignadoA: req.user._id, estadoProgreso: 'activa' },
       { estadoProgreso: 'pausada', fechaUltimaReanudacion: null }
     );
     
-    // Reanudar esta tarea
     tarjeta.estadoProgreso = 'activa';
     tarjeta.fechaUltimaReanudacion = new Date();
     await tarjeta.save();
     
-    console.log(`▶️ Tarea reanudada: ${tarjeta.titulo}`);
+    console.log(`✅ Tarea reanudada: ${tarjeta.titulo}`);
     
     const tarjetaActualizada = await Tarjeta.findById(req.params.id)
       .populate('asignadoA', 'nombre email')
@@ -1128,27 +1328,46 @@ router.put('/:id/reanudar', protect, async (req, res) => {
   }
 });
 
-// Aprobar tarea (jefe)
+// ============================================================
+// PUT: Aprobar tarea (jefe) - CORREGIDO
+// ============================================================
 router.put('/:id/aprobar-jefe', protect, jefeOnly, async (req, res) => {
   try {
+    console.log('========================================');
+    console.log('✅ [APROBAR-JEFE] Aprobando tarea...');
+    console.log(`👤 Jefe: ${req.user.email}`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.estado !== 'revision_jefe') {
+      console.log(`❌ Tarea no está en revisión (${tarjeta.estado})`);
       return res.status(400).json({ message: 'Esta tarea no está pendiente de aprobación' });
     }
     
+    // 🔥 LÓGICA CORREGIDA: Determinar si va a cliente o se finaliza
+    const esSolicitudCliente = tarjeta.tipo === 'solicitud_cliente' && tarjeta.clienteInfo?.userId;
+    
+    console.log(`   📋 Tipo: ${tarjeta.tipo}`);
+    console.log(`   👤 Cliente ID: ${tarjeta.clienteInfo?.userId || 'N/A'}`);
+    console.log(`   📌 Es solicitud de cliente: ${esSolicitudCliente}`);
+    
+    // Aprobar revisión del jefe
     tarjeta.revisionJefe = 'aprobada';
-    tarjeta.estado = 'revision_cliente';
-    tarjeta.fechaRevisionCliente = new Date();
-    tarjeta.estadoCalificacion = 'pendiente';
-    tarjeta.fechaExpiracionCalificacion = new Date(Date.now() + 24 * 60 * 60 * 1000);
     
-    await tarjeta.save();
-    
-    if (tarjeta.clienteInfo?.userId) {
+    if (esSolicitudCliente) {
+      // ✅ CASO 1: Solicitud de cliente → va a revisión del cliente
+      console.log('   ➡️ Enviando a REVISIÓN CLIENTE');
+      tarjeta.estado = 'revision_cliente';
+      tarjeta.fechaRevisionCliente = new Date();
+      tarjeta.estadoCalificacion = 'pendiente';
+      tarjeta.fechaExpiracionCalificacion = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000);
+      
+      // Notificar al cliente
       const io = req.app.get('io');
       const clients = req.app.get('clients');
       const socketCliente = clients.get(tarjeta.clienteInfo.userId.toString());
@@ -1157,30 +1376,70 @@ router.put('/:id/aprobar-jefe', protect, jefeOnly, async (req, res) => {
           tareaId: tarjeta._id,
           titulo: tarjeta.titulo
         });
+        console.log(`📢 Notificado al cliente: ${tarjeta.clienteInfo.userId}`);
+      }
+    } else {
+      // ✅ CASO 2: Tarea extra o asignación de jefe → finalizar directamente
+      console.log('   ➡️ Finalizando tarea DIRECTAMENTE (sin cliente)');
+      tarjeta.estado = 'finalizada';
+      tarjeta.fechaFinalizada = new Date();
+      tarjeta.estadoCalificacion = 'no_aplica';
+      
+      // Notificar al empleado
+      if (tarjeta.asignadoA) {
+        const io = req.app.get('io');
+        const clients = req.app.get('clients');
+        const socketEmpleado = clients.get(tarjeta.asignadoA.toString());
+        if (socketEmpleado) {
+          socketEmpleado.emit('tarea-finalizada-sin-cliente', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            mensaje: '✅ Tarea aprobada y finalizada'
+          });
+          console.log(`📢 Notificado al empleado: ${tarjeta.asignadoA}`);
+        }
       }
     }
     
-    res.json({ success: true, tarjeta });
+    await tarjeta.save();
+    console.log(`✅ Tarea aprobada. Nuevo estado: ${tarjeta.estado}`);
+    console.log('========================================\n');
+    
+    res.json({ 
+      success: true, 
+      message: esSolicitudCliente ? 'Tarea enviada a revisión del cliente' : 'Tarea finalizada',
+      tarjeta 
+    });
   } catch (error) {
+    console.error('❌ Error en aprobar-jefe:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Calificar tarea (cliente)
+// ============================================================
+// PUT: Calificar tarea (cliente)
+// ============================================================
 router.put('/:id/calificar', protect, async (req, res) => {
   try {
+    console.log('⭐ [CALIFICAR] Calificando tarea...');
+    console.log(`👤 Usuario: ${req.user.email} (${req.user.rol})`);
+    console.log(`📌 Tarea ID: ${req.params.id}`);
+    
     const { puntaje, comentario } = req.body;
     
     const tarjeta = await Tarjeta.findById(req.params.id);
     if (!tarjeta) {
+      console.log('❌ Tarea no encontrada');
       return res.status(404).json({ message: 'Tarea no encontrada' });
     }
     
     if (tarjeta.estado !== 'revision_cliente') {
+      console.log(`❌ Tarea no está en revisión cliente (${tarjeta.estado})`);
       return res.status(400).json({ message: 'Esta tarea no está pendiente de calificación' });
     }
     
     if (tarjeta.clienteInfo.userId?.toString() !== req.user._id.toString()) {
+      console.log(`❌ Usuario no es el cliente que solicitó: ${tarjeta.clienteInfo.userId} vs ${req.user._id}`);
       return res.status(403).json({ message: 'No puedes calificar esta tarea' });
     }
     
@@ -1196,6 +1455,8 @@ router.put('/:id/calificar', protect, async (req, res) => {
     
     await tarjeta.save();
     
+    console.log(`✅ Tarea calificada con ${puntaje} estrellas`);
+    
     if (tarjeta.asignadoA) {
       const io = req.app.get('io');
       const clients = req.app.get('clients');
@@ -1207,11 +1468,13 @@ router.put('/:id/calificar', protect, async (req, res) => {
           puntaje,
           comentario
         });
+        console.log(`📢 Notificado al empleado ${tarjeta.asignadoA}`);
       }
     }
     
     res.json({ success: true, tarjeta });
   } catch (error) {
+    console.error('❌ Error en calificar:', error);
     res.status(500).json({ message: error.message });
   }
 });

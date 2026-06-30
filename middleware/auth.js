@@ -1,3 +1,4 @@
+// middleware/auth.js
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 
@@ -8,9 +9,7 @@ export const protect = async (req, res, next) => {
     try {
       token = req.headers.authorization.split(' ')[1];
       
-      // Verificar que el token no esté vacío
       if (!token || token === 'null' || token === 'undefined') {
-        console.log('❌ Token vacío o inválido');
         return res.status(401).json({ message: 'No autorizado, token inválido' });
       }
       
@@ -24,15 +23,12 @@ export const protect = async (req, res, next) => {
       next();
     } catch (error) {
       console.error('Error en auth:', error.message);
-      
-      // Mensajes más amigables según el tipo de error
       if (error.name === 'JsonWebTokenError') {
         return res.status(401).json({ message: 'Token inválido, por favor inicia sesión nuevamente' });
       }
       if (error.name === 'TokenExpiredError') {
         return res.status(401).json({ message: 'Token expirado, por favor inicia sesión nuevamente' });
       }
-      
       return res.status(401).json({ message: 'No autorizado' });
     }
   }
