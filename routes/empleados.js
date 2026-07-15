@@ -1,23 +1,20 @@
-// routes/empleados.js - Con gestión de roles
+// routes/empleados.js
 import express from 'express';
 import User from '../models/User.js';
-import { protect, jefeOnly } from '../middleware/auth.js';
+import { protect, supervisorOnly } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// ============================================================
-// Obtener todos los empleados (solo jefe)
-// ============================================================
-router.get('/', protect, jefeOnly, async (req, res) => {
+router.get('/', protect, supervisorOnly, async (req, res) => {
   try {
-    const empleados = await User.find({ 
-      rol: { $in: ['empleado', 'cliente'] }, 
+    const tecnicos = await User.find({ 
+      rol: { $in: ['tecnico', 'usuario'] }, 
       activo: true 
     })
       .select('-password')
       .sort('nombre');
     
-    const empleadosFormateados = empleados.map(emp => ({
+    const tecnicosFormateados = tecnicos.map(emp => ({
       _id: emp._id,
       nombre: emp.nombre,
       email: emp.email,
@@ -27,16 +24,13 @@ router.get('/', protect, jefeOnly, async (req, res) => {
       tareasActivas: emp.tareasActivas || []
     }));
     
-    res.json(empleadosFormateados);
+    res.json(tecnicosFormateados);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
 
-// ============================================================
-// Obtener todos los usuarios (incluyendo jefes) - solo jefe
-// ============================================================
-router.get('/todos', protect, jefeOnly, async (req, res) => {
+router.get('/todos', protect, supervisorOnly, async (req, res) => {
   try {
     const usuarios = await User.find({ activo: true })
       .select('-password')
@@ -48,23 +42,18 @@ router.get('/todos', protect, jefeOnly, async (req, res) => {
   }
 });
 
-// ============================================================
-// ACTUALIZAR ROL DE UN USUARIO (SOLO JEFES)
-// ============================================================
-router.put('/:userId/rol', protect, jefeOnly, async (req, res) => {
+router.put('/:userId/rol', protect, supervisorOnly, async (req, res) => {
   try {
     const { userId } = req.params;
     const { rol } = req.body;
 
-    // Validar rol
-    if (!['jefe', 'empleado', 'cliente'].includes(rol)) {
+    if (!['supervisor', 'tecnico', 'usuario'].includes(rol)) {
       return res.status(400).json({
         success: false,
-        error: 'Rol inválido. Debe ser: jefe, empleado o cliente'
+        error: 'Rol inválido. Debe ser: supervisor, tecnico o usuario'
       });
     }
 
-    // Verificar que el usuario existe
     const user = await User.findById(userId);
     if (!user) {
       return res.status(404).json({
@@ -73,7 +62,6 @@ router.put('/:userId/rol', protect, jefeOnly, async (req, res) => {
       });
     }
 
-    // No permitir cambiar el propio rol
     if (userId === req.user._id.toString()) {
       return res.status(400).json({
         success: false,
@@ -81,29 +69,26 @@ router.put('/:userId/rol', protect, jefeOnly, async (req, res) => {
       });
     }
 
-    // VERIFICAR: Si se está quitando el rol de jefe, asegurar que quede al menos uno
-    if (user.rol === 'jefe' && rol !== 'jefe') {
-      const countJefes = await User.countDocuments({ 
-        rol: 'jefe', 
+    if (user.rol === 'supervisor' && rol !== 'supervisor') {
+      const countSupervisores = await User.countDocuments({ 
+        rol: 'supervisor', 
         _id: { $ne: userId },
         activo: true 
       });
       
-      if (countJefes === 0) {
+      if (countSupervisores === 0) {
         return res.status(400).json({
           success: false,
-          error: 'No se puede quitar el rol de jefe. Debe haber al menos un jefe en el sistema.'
+          error: 'No se puede quitar el rol de supervisor. Debe haber al menos un supervisor en el sistema.'
         });
       }
     }
 
-    // Actualizar rol
     user.rol = rol;
     await user.save();
 
     console.log(`✅ Rol actualizado: ${user.email} -> ${user.rol}`);
 
-    // Notificar via Socket.IO
     const io = req.app.get('io');
     const clients = req.app.get('clients');
     const socket = clients.get(userId);
@@ -135,17 +120,14 @@ router.put('/:userId/rol', protect, jefeOnly, async (req, res) => {
   }
 });
 
-// ============================================================
-// Obtener lista de jefes (para validaciones)
-// ============================================================
-router.get('/jefes', protect, async (req, res) => {
+router.get('/supervisores', protect, async (req, res) => {
   try {
-    const jefes = await User.find({ 
-      rol: 'jefe', 
+    const supervisores = await User.find({ 
+      rol: 'supervisor', 
       activo: true 
     }).select('_id nombre email');
     
-    res.json(jefes);
+    res.json(supervisores);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }

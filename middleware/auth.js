@@ -38,18 +38,18 @@ export const protect = async (req, res, next) => {
   }
 };
 
-export const jefeOnly = (req, res, next) => {
-  if (req.user && req.user.rol === 'jefe') {
+export const supervisorOnly = (req, res, next) => {
+  if (req.user && req.user.rol === 'supervisor') {
     next();
   } else {
-    return res.status(403).json({ message: 'Acceso solo para jefes' });
+    return res.status(403).json({ message: 'Acceso solo para supervisores' });
   }
 };
 
-export const empleadoOrJefe = (req, res, next) => {
-  if (req.user && (req.user.rol === 'empleado' || req.user.rol === 'jefe')) {
+export const tecnicoOrSupervisor = (req, res, next) => {
+  if (req.user && (req.user.rol === 'tecnico' || req.user.rol === 'supervisor')) {
     next();
   } else {
-    return res.status(403).json({ message: 'Acceso solo para personal' });
+    return res.status(403).json({ message: 'Acceso solo para técnicos y supervisores' });
   }
 };

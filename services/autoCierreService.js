@@ -1,249 +1,249 @@
+// services/autoCierreService.js
 import Tarjeta from '../models/Tarjeta.js';
 import User from '../models/User.js';
 
-// Función principal para auto-finalizar tareas expiradas
-export const autoFinalizarTareasExpiradas = async (io, clients) => {
+// ============================================================
+// ALMACENAR TIMEOUTS POR TAREA (para cancelar si es necesario)
+// ============================================================
+export const timeouts = new Map();
+
+// ============================================================
+// AUTO-FINALIZAR TAREA (EVENTO REAL)
+// ============================================================
+export const autoFinalizarTarea = async (tareaId, io, clients) => {
   try {
-    console.log('🔄 [AUTO-CIERRE] Verificando tareas expiradas...', new Date().toISOString());
+    console.log(`🔥 [AUTO-CIERRE] Evento real para tarea: ${tareaId}`);
     
-    // Obtener configuración global del jefe
-    const jefe = await User.findOne({ rol: 'jefe', activo: true });
+    const tarjeta = await Tarjeta.findById(tareaId).populate('asignadoA', 'nombre email');
     
-    if (!jefe || !jefe.configuracionAutoCierre?.habilitado) {
-      console.log('⚠️ [AUTO-CIERRE] Auto-cierre deshabilitado por el jefe');
+    if (!tarjeta) {
+      console.log(`❌ Tarea ${tareaId} no encontrada`);
+      timeouts.delete(tareaId);
       return;
     }
     
-    const config = jefe.configuracionAutoCierre;
-    const excepcionesIds = config.excepcionesEmpleados?.map(id => id.toString()) || [];
+    // Verificar que sigue activa
+    if (tarjeta.estado !== 'en_progreso') {
+      console.log(`⏭️ Tarea ${tareaId} ya no está en progreso (${tarjeta.estado})`);
+      timeouts.delete(tareaId);
+      return;
+    }
     
-    const resultados = {
-      revisadas: 0,
-      finalizadas: 0,
-      notificadas: 0
-    };
-    
-    // 1. REVISAR TAREAS EN REVISIÓN DE CLIENTE
-    if (config.revisarColumna === 'revision_cliente' || config.revisarColumna === 'ambas') {
-      const fechaLimite = new Date();
-      fechaLimite.setDate(fechaLimite.getDate() - config.diasMaximosCliente);
-      
-      const tareasExpiradas = await Tarjeta.find({
-        estado: 'revision_cliente',
-        estadoCalificacion: 'pendiente',
-        createdAt: { $lt: fechaLimite },
-        asignadoA: { $nin: excepcionesIds } // Excluir excepciones
-      }).populate('asignadoA', 'nombre email');
-      
-      console.log(`📊 [CLIENTE] Encontradas ${tareasExpiradas.length} tareas expiradas (${config.diasMaximosCliente} días)`);
-      
-      for (const tarjeta of tareasExpiradas) {
-        await procesarTareaExpirada(tarjeta, config, io, clients, 'cliente');
-        resultados.finalizadas++;
+    if (tarjeta.estadoProgreso !== 'activa') {
+      console.log(`⏭️ Tarea ${tareaId} está pausada, reprogramando...`);
+      // Si está pausada, reprogramar con el tiempo restante
+      const tiempoRestante = Math.max(0, tarjeta.tiempoEstimadoEmpleado - (tarjeta.tiempoAcumulado || 0));
+      if (tiempoRestante > 0) {
+        programarAutoFinalizacion(tareaId, tiempoRestante, io, clients);
       }
-      resultados.revisadas += tareasExpiradas.length;
+      return;
     }
     
-    // 2. REVISAR TAREAS EN REVISIÓN DE JEFE
-    if (config.revisarColumna === 'revision_jefe' || config.revisarColumna === 'ambas') {
-      const fechaLimite = new Date();
-      fechaLimite.setDate(fechaLimite.getDate() - config.diasMaximosJefe);
-      
-      const tareasExpiradas = await Tarjeta.find({
-        estado: 'revision_jefe',
-        revisionJefe: 'pendiente',
-        createdAt: { $lt: fechaLimite },
-        asignadoA: { $nin: excepcionesIds }
-      }).populate('asignadoA', 'nombre email');
-      
-      console.log(`📊 [JEFE] Encontradas ${tareasExpiradas.length} tareas expiradas (${config.diasMaximosJefe} días)`);
-      
-      for (const tarjeta of tareasExpiradas) {
-        await procesarTareaExpirada(tarjeta, config, io, clients, 'jefe');
-        resultados.finalizadas++;
+    // Calcular tiempo real trabajado
+    let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+    if (tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+      tiempoTotalTrabajado += minutosDesdeReanudacion;
+    }
+    
+    console.log(`✅ AUTO-FINALIZANDO: ${tarjeta.titulo}`);
+    console.log(`   Tiempo estimado: ${tarjeta.tiempoEstimadoEmpleado} min`);
+    console.log(`   Tiempo trabajado: ${tiempoTotalTrabajado} min`);
+    
+    // Actualizar tarjeta
+    tarjeta.estado = 'revision_supervisor';
+    tarjeta.fechaCompletadaEmpleado = new Date();
+    tarjeta.fechaRevisionSupervisor = new Date();
+    tarjeta.revisionSupervisor = 'pendiente';
+    tarjeta.fechaExpiracionRevisionSupervisor = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    tarjeta.estadoProgreso = 'completada';
+    tarjeta.porcentajeCompletado = 100;
+    tarjeta.tiempoAcumulado = tiempoTotalTrabajado;
+    
+    await tarjeta.save();
+    
+    // ============================================================
+    // 🔥 NOTIFICACIONES EN TIEMPO REAL VÍA WEBSOCKET
+    // ============================================================
+    
+    if (io && clients) {
+      // 1. NOTIFICAR AL TÉCNICO
+      if (tarjeta.asignadoA) {
+        const socketEmpleado = clients.get(tarjeta.asignadoA._id.toString());
+        if (socketEmpleado) {
+          socketEmpleado.emit('tarea-auto-finalizada', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            mensaje: '✅ Tarea completada automáticamente (tiempo estimado cumplido)',
+            empleadoNombre: tarjeta.asignadoA.nombre,
+            tiempoEstimado: tarjeta.tiempoEstimadoEmpleado,
+            tiempoReal: tiempoTotalTrabajado
+          });
+          console.log(`   ✅ Socket emitido a técnico: ${tarjeta.asignadoA.nombre}`);
+        }
       }
-      resultados.revisadas += tareasExpiradas.length;
+      
+      // 2. NOTIFICAR A TODOS LOS SUPERVISORES
+      const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id nombre');
+      for (const supervisor of supervisores) {
+        const socket = clients.get(supervisor._id.toString());
+        if (socket) {
+          socket.emit('tarea-lista-para-revision', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            empleadoId: tarjeta.asignadoA?._id,
+            empleadoNombre: tarjeta.asignadoA?.nombre || 'Sin asignar',
+            tiempoEstimado: tarjeta.tiempoEstimadoEmpleado,
+            tiempoReal: tiempoTotalTrabajado,
+            mensaje: `📋 Tarea "${tarjeta.titulo}" lista para revisión (auto-finalizada)`
+          });
+          console.log(`   ✅ Socket emitido a supervisor: ${supervisor.nombre}`);
+        }
+      }
+      
+      // 3. NOTIFICAR AL CLIENTE (si tiene cuenta)
+      if (tarjeta.clienteInfo?.userId) {
+        const socketCliente = clients.get(tarjeta.clienteInfo.userId.toString());
+        if (socketCliente) {
+          socketCliente.emit('tarea-por-revisar', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            mensaje: `📋 Tu solicitud "${tarjeta.titulo}" está lista para revisión`
+          });
+          console.log(`   ✅ Socket emitido a cliente: ${tarjeta.clienteInfo.userId}`);
+        }
+      }
+      
+      // 4. NOTIFICACIÓN GENERAL (a todos los usuarios conectados)
+      io.emit('estado-general-actualizado', {
+        tareaId: tarjeta._id,
+        titulo: tarjeta.titulo,
+        estado: tarjeta.estado,
+        porcentaje: 100,
+        accion: 'auto-finalizada',
+        mensaje: `Tarea "${tarjeta.titulo}" auto-finalizada por tiempo cumplido`
+      });
+      console.log(`   ✅ Socket emitido a todos los usuarios`);
     }
     
-    // 3. ENVIAR NOTIFICACIONES DE ADVERTENCIA (días antes)
-    if (config.notificarAntesDias > 0) {
-      await enviarNotificacionesAdvertencia(config, io, clients);
-      resultados.notificadas = await contarNotificacionesEnviadas();
-    }
+    // Limpiar timeout
+    timeouts.delete(tareaId);
+    console.log(`✅ [AUTO-CIERRE] Tarea ${tareaId} finalizada exitosamente`);
     
-    console.log(`✅ [AUTO-CIERRE] Completado: ${resultados.finalizadas} auto-finalizadas, ${resultados.notificadas} notificaciones`);
-    
-    return resultados;
+    return { success: true, tarjeta };
     
   } catch (error) {
-    console.error('❌ [AUTO-CIERRE] Error:', error);
-    return { error: error.message };
+    console.error('❌ [AUTO-CIERRE] Error en autoFinalizarTarea:', error);
+    timeouts.delete(tareaId);
+    return { success: false, error: error.message };
   }
 };
 
-// Procesar una tarea expirada según la acción configurada
-async function procesarTareaExpirada(tarjeta, config, io, clients, tipo) {
-  console.log(`⏰ Procesando tarea: ${tarjeta.titulo} (${tipo})`);
-  
-  let mensaje = '';
-  let nuevoEstado = '';
-  let calificacionAuto = {};
-  
-  switch (config.accionAuto) {
-    case 'finalizar':
-      nuevoEstado = 'finalizada';
-      mensaje = `✅ Tarea auto-finalizada por falta de revisión del ${tipo === 'cliente' ? 'cliente' : 'jefe'}`;
-      calificacionAuto = {
-        puntaje: null,
-        comentario: mensaje,
-        fecha: new Date(),
-        autoFinalizada: true,
-        tipo: tipo
-      };
-      break;
-      
-    case 'notificar_jefe':
-      nuevoEstado = 'revision_jefe';
-      mensaje = `⚠️ Tarea requiere atención del jefe (venció revisión de ${tipo})`;
-      calificacionAuto = {
-        comentario: mensaje,
-        fecha: new Date(),
-        requiereAtencion: true
-      };
-      break;
-      
-    case 'escalar':
-      nuevoEstado = 'pendiente';
-      mensaje = `🔄 Tarea reabierta por falta de revisión. Se reasignará a otro empleado`;
-      calificacionAuto = {
-        comentario: mensaje,
-        fecha: new Date(),
-        reabierta: true
-      };
-      // Reasignar a nuevo empleado
-      tarjeta.asignadoA = null;
-      break;
-      
-    case 'reabrir':
-      nuevoEstado = 'en_progreso';
-      mensaje = `🔄 Tarea reabierta. El empleado debe continuar trabajando`;
-      calificacionAuto = {
-        comentario: mensaje,
-        fecha: new Date(),
-        reabierta: true
-      };
-      break;
-      
-    default:
-      nuevoEstado = 'finalizada';
-      mensaje = `Tarea finalizada automáticamente`;
+// ============================================================
+// PROGRAMAR AUTO-FINALIZACIÓN (SETTIMEOUT REAL)
+// ============================================================
+export const programarAutoFinalizacion = (tarjetaId, tiempoMinutos, io, clients) => {
+  // Cancelar timeout existente
+  if (timeouts.has(tarjetaId)) {
+    clearTimeout(timeouts.get(tarjetaId));
+    timeouts.delete(tarjetaId);
+    console.log(`⏹️ Auto-finalización cancelada para tarea ${tarjetaId}`);
   }
   
-  // Actualizar tarjeta
-  tarjeta.estado = nuevoEstado;
-  tarjeta.fechaFinalizada = new Date();
-  tarjeta.estadoCalificacion = 'expirada';
-  tarjeta.calificacion = calificacionAuto;
-  
-  if (config.accionAuto === 'escalar') {
-    tarjeta.asignadoA = null;
+  // Si el tiempo es 0 o menor, no programar
+  if (!tiempoMinutos || tiempoMinutos <= 0) {
+    console.log(`⚠️ Tiempo inválido para tarea ${tarjetaId}: ${tiempoMinutos} min`);
+    return;
   }
   
-  await tarjeta.save();
+  // Convertir a milisegundos y añadir 30 segundos de gracia
+  const tiempoMs = (tiempoMinutos * 60 * 1000) + (30 * 1000);
   
-  // Notificaciones vía Socket.IO
-  if (io && clients) {
-    // Notificar al empleado
-    if (tarjeta.asignadoA) {
-      const socketEmpleado = clients.get(tarjeta.asignadoA._id?.toString());
-      if (socketEmpleado) {
-        socketEmpleado.emit('tarea-auto-finalizada', {
-          tareaId: tarjeta._id,
-          titulo: tarjeta.titulo,
-          mensaje: mensaje,
-          accion: config.accionAuto
-        });
+  console.log(`⏰ Programando auto-finalización para tarea ${tarjetaId} en ${tiempoMinutos} minutos (${Math.floor(tiempoMs/1000)}s)`);
+  
+  // Crear nuevo timeout
+  const timeoutId = setTimeout(async () => {
+    console.log(`🔥 [EVENTO] Timeout disparado para tarea ${tarjetaId}`);
+    await autoFinalizarTarea(tarjetaId, io, clients);
+  }, tiempoMs);
+  
+  timeouts.set(tarjetaId, timeoutId);
+};
+
+// ============================================================
+// CANCELAR AUTO-FINALIZACIÓN
+// ============================================================
+export const cancelarAutoFinalizacion = (tarjetaId) => {
+  if (timeouts.has(tarjetaId)) {
+    clearTimeout(timeouts.get(tarjetaId));
+    timeouts.delete(tarjetaId);
+    console.log(`⏹️ Auto-finalización cancelada para tarea ${tarjetaId}`);
+    return true;
+  }
+  return false;
+};
+
+// ============================================================
+// VERIFICAR TAREAS HUÉRFANAS (al iniciar el servidor)
+// ============================================================
+export const verificarTareasActivas = async (io, clients) => {
+  try {
+    console.log('🔍 Verificando tareas activas existentes...');
+    
+    const tareasActivas = await Tarjeta.find({
+      estado: 'en_progreso',
+      estadoProgreso: 'activa',
+      tiempoEstimadoEmpleado: { $gt: 0 }
+    }).populate('asignadoA', 'nombre email');
+    
+    console.log(`📊 Encontradas ${tareasActivas.length} tareas activas`);
+    
+    for (const tarjeta of tareasActivas) {
+      // Calcular tiempo trabajado
+      let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+      
+      if (tarjeta.fechaUltimaReanudacion) {
+        const ahora = new Date();
+        const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+        const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+        tiempoTotalTrabajado += minutosDesdeReanudacion;
+      }
+      
+      const tiempoRestante = Math.max(0, tarjeta.tiempoEstimadoEmpleado - tiempoTotalTrabajado);
+      
+      // Si ya excedió el tiempo, finalizar inmediatamente
+      if (tiempoRestante <= 0) {
+        console.log(`⚠️ Tarea ${tarjeta.titulo} ya excedió el tiempo, finalizando...`);
+        await autoFinalizarTarea(tarjeta._id, io, clients);
+      } else {
+        // Reprogramar con el tiempo restante
+        console.log(`⏰ Reprogramando tarea ${tarjeta.titulo}: ${tiempoRestante} min restantes`);
+        programarAutoFinalizacion(tarjeta._id, tiempoRestante, io, clients);
       }
     }
     
-    // Notificar a todos los jefes
-    const jefes = await User.find({ rol: 'jefe', activo: true }).select('_id');
-    jefes.forEach(jefe => {
-      const socket = clients.get(jefe._id.toString());
-      if (socket) {
-        socket.emit('tarea-auto-finalizada', {
-          tareaId: tarjeta._id,
-          titulo: tarjeta.titulo,
-          empleado: tarjeta.asignadoA?.nombre,
-          mensaje: mensaje,
-          accion: config.accionAuto
-        });
-      }
-    });
-  }
-  
-  console.log(`   ✅ Tarea ${tarjeta._id} -> ${nuevoEstado}`);
-}
-
-// Enviar notificaciones de advertencia días antes de expirar
-async function enviarNotificacionesAdvertencia(config, io, clients) {
-  const fechaAdvertencia = new Date();
-  fechaAdvertencia.setDate(fechaAdvertencia.getDate() + config.notificarAntesDias);
-  
-  // Tareas que expiran pronto
-  const tareasPorExpirar = await Tarjeta.find({
-    estado: 'revision_cliente',
-    estadoCalificacion: 'pendiente',
-    createdAt: { $lt: fechaAdvertencia }
-  }).populate('asignadoA', 'nombre email');
-  
-  for (const tarjeta of tareasPorExpirar) {
-    // Notificar al cliente si tiene socket
-    if (tarjeta.clienteInfo?.userId && clients) {
-      const socketCliente = clients.get(tarjeta.clienteInfo.userId.toString());
-      if (socketCliente) {
-        socketCliente.emit('tarea-por-expirar', {
-          tareaId: tarjeta._id,
-          titulo: tarjeta.titulo,
-          diasRestantes: config.notificarAntesDias,
-          mensaje: `⚠️ La tarea "${tarjeta.titulo}" expirará en ${config.notificarAntesDias} días si no la revisas`
-        });
-      }
-    }
+    console.log('✅ Verificación completada');
     
-    // Notificar al empleado
-    if (tarjeta.asignadoA && clients) {
-      const socketEmpleado = clients.get(tarjeta.asignadoA._id.toString());
-      if (socketEmpleado) {
-        socketEmpleado.emit('tarea-por-expirar', {
-          tareaId: tarjeta._id,
-          titulo: tarjeta.titulo,
-          diasRestantes: config.notificarAntesDias,
-          mensaje: `⚠️ La tarea "${tarjeta.titulo}" será auto-finalizada si el cliente no la revisa en ${config.notificarAntesDias} días`
-        });
-      }
-    }
+  } catch (error) {
+    console.error('❌ Error en verificarTareasActivas:', error);
   }
-}
+};
 
-async function contarNotificacionesEnviadas() {
-  // Implementar si se quiere guardar histórico
-  return 0;
-}
-
-// Iniciar el servicio programado
+// ============================================================
+// INICIAR SERVICIO (sin setInterval)
+// ============================================================
 export const iniciarAutoCierreService = (io, clients) => {
-  // Ejecutar cada hora
-  const intervalId = setInterval(async () => {
-    await autoFinalizarTareasExpiradas(io, clients);
-  }, 60 * 60 * 1000); // Cada hora
+  console.log('⏰ [SERVICIO] Iniciando auto-cierre con eventos reales...');
+  console.log(`   📡 io: ${io ? '✅ Disponible' : '❌ No disponible'}`);
+  console.log(`   👥 clients: ${clients ? '✅ Disponible' : '❌ No disponible'}`);
+  console.log(`   ⏱️ Usando setTimeout (eventos reales, no polling)`);
   
-  // También ejecutar al iniciar
+  // Verificar tareas activas al iniciar
   setTimeout(() => {
-    autoFinalizarTareasExpiradas(io, clients);
-  }, 5000); // 5 segundos después de iniciar
+    verificarTareasActivas(io, clients);
+  }, 3000);
   
-  console.log('⏰ [SERVICIO] Auto-cierre de tareas iniciado (cada hora)');
-  
-  return intervalId;
+  console.log('⏰ [SERVICIO] Auto-cierre de tareas activo (basado en eventos)');
 };

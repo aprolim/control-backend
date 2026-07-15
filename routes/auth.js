@@ -1,4 +1,4 @@
-// routes/auth.js - Login con Zimbra (CON ROLES CORREGIDO)
+// routes/auth.js - Login con Zimbra (VERSIÓN SIMPLIFICADA)
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import axios from 'axios';
@@ -8,14 +8,8 @@ import User from '../models/User.js';
 const router = express.Router();
 const ZIMBRA_SERVER = 'https://correo.senado.gob.bo/service/soap';
 
-// ============================================================
-// CONFIGURACIÓN: Usuario jefe inicial
-// ============================================================
-const JEFE_INICIAL_EMAIL = 'grover.plaza@senado.gob.bo';
+const SUPERVISOR_INICIAL_EMAIL = 'grover.plaza@senado.gob.bo';
 
-// ============================================================
-// FUNCIÓN: Extraer información del usuario desde XML
-// ============================================================
 function extraerInfoUsuario(xmlData) {
     let uid = null;
     let nombre = null;
@@ -70,9 +64,6 @@ function extraerInfoUsuario(xmlData) {
     return { uid, nombre, email, userId };
 }
 
-// ============================================================
-// FUNCIÓN: Obtener o crear usuario en MongoDB
-// ============================================================
 async function getOrCreateUser(userInfo, zimbraToken) {
     console.log(`🔍 Buscando usuario: ${userInfo.email}`);
     
@@ -83,9 +74,8 @@ async function getOrCreateUser(userInfo, zimbraToken) {
     }
 
     if (!user) {
-        // Determinar rol: si es el jefe inicial, asignar 'jefe', sino 'cliente'
-        const esJefeInicial = userInfo.email === JEFE_INICIAL_EMAIL;
-        const rolAsignado = esJefeInicial ? 'jefe' : 'cliente';
+        const esSupervisorInicial = userInfo.email === SUPERVISOR_INICIAL_EMAIL;
+        const rolAsignado = esSupervisorInicial ? 'supervisor' : 'usuario';
         
         console.log(`👤 Creando nuevo usuario... (rol: ${rolAsignado})`);
         user = new User({
@@ -100,7 +90,6 @@ async function getOrCreateUser(userInfo, zimbraToken) {
         console.log(`✅ Usuario creado: ${user.email} (rol: ${user.rol})`);
     } else {
         console.log(`✅ Usuario existente: ${user.email} (rol: ${user.rol})`);
-        // Actualizar datos de Zimbra (sin modificar el rol)
         user.nombre = userInfo.nombre || user.nombre;
         user.zimbraUid = userInfo.uid || user.zimbraUid;
         user.zimbraToken = zimbraToken;
@@ -111,40 +100,10 @@ async function getOrCreateUser(userInfo, zimbraToken) {
     return user;
 }
 
-// ============================================================
-// FUNCIÓN: Generar JWT
-// ============================================================
 function generateToken(userId) {
     return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: '30d' });
 }
 
-// ============================================================
-// FUNCIÓN: Verificar que no se quede sin jefes
-// ============================================================
-async function verificarUltimoJefe(userId, nuevoRol) {
-    // Si el usuario no es jefe o no se está quitando el rol jefe, no hay problema
-    const user = await User.findById(userId);
-    if (!user || user.rol !== 'jefe' || nuevoRol === 'jefe') {
-        return true;
-    }
-    
-    // Contar cuántos jefes hay (excluyendo al usuario actual)
-    const countJefes = await User.countDocuments({ 
-        rol: 'jefe', 
-        _id: { $ne: userId },
-        activo: true 
-    });
-    
-    if (countJefes === 0) {
-        throw new Error('No se puede quitar el rol de jefe. Debe haber al menos un jefe en el sistema.');
-    }
-    
-    return true;
-}
-
-// ============================================================
-// ENDPOINT: Login con Zimbra
-// ============================================================
 router.post('/login', async (req, res) => {
     const { usuario, password } = req.body;
 
@@ -157,13 +116,12 @@ router.post('/login', async (req, res) => {
         console.log('❌ Faltan credenciales');
         return res.status(400).json({
             success: false,
-            error: 'Faltan usuario o contraseña'
+            error: 'Faltan credenciales',
+            mensaje: 'Por favor ingresa tu usuario y contraseña'
         });
     }
 
     try {
-        // 1. Construir petición SOAP
-        console.log('📤 Construyendo petición SOAP...');
         const authRequest = `<?xml version="1.0"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
     <soap:Body>
@@ -176,33 +134,83 @@ router.post('/login', async (req, res) => {
 
         console.log(`🌐 Enviando a: ${ZIMBRA_SERVER}`);
         
-        const authResponse = await axios.post(ZIMBRA_SERVER, authRequest, {
-            headers: { 'Content-Type': 'application/xml' },
-            httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-            timeout: 15000
-        });
+        let authResponse;
+        try {
+            authResponse = await axios.post(ZIMBRA_SERVER, authRequest, {
+                headers: { 'Content-Type': 'application/xml' },
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                timeout: 15000
+            });
+        } catch (axiosError) {
+            console.log('❌ Error al llamar a Zimbra:');
+            
+            if (axiosError.response) {
+                console.log(`   Status: ${axiosError.response.status}`);
+                const responseData = axiosError.response.data || '';
+                
+                // 🔥 DETECTAR ERROR DE AUTENTICACIÓN (usuario o contraseña incorrectos)
+                const isAuthError = responseData.includes('authentication failed') || 
+                                   responseData.includes('AUTH_FAILED') ||
+                                   responseData.includes('soap:Fault');
+                
+                if (isAuthError) {
+                    console.log('✅ Error de autenticación: usuario o contraseña incorrectos');
+                    
+                    // 🔥 MENSAJE GENÉRICO Y CLARO
+                    return res.status(401).json({
+                        success: false,
+                        error: 'Credenciales incorrectas',
+                        mensaje: 'Usuario o contraseña incorrectos. Por favor verifica tus datos.',
+                        detalle: 'Asegúrate de usar tu correo y contraseña de Zimbra.'
+                    });
+                }
+            }
+            
+            // Error de conexión
+            if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED' || axiosError.code === 'ETIMEDOUT') {
+                console.log('⚠️ Error de conexión con Zimbra');
+                return res.status(503).json({
+                    success: false,
+                    error: 'Servicio no disponible',
+                    mensaje: 'No pudimos conectar con el servidor de autenticación.',
+                    detalle: 'Verifica tu conexión de red o intenta más tarde.'
+                });
+            }
+            
+            throw axiosError;
+        }
 
         console.log(`📨 Respuesta recibida (status: ${authResponse.status})`);
 
-        if (authResponse.data.includes('<soap:Fault>')) {
-            const faultMatch = authResponse.data.match(/<faultstring>(.*?)<\/faultstring>/);
-            const errorMsg = faultMatch ? faultMatch[1] : 'Error de autenticación';
-            console.log(`❌ Error SOAP: ${errorMsg}`);
+        // Verificar si hay error SOAP
+        const responseData = authResponse.data || '';
+        const hasSoapFault = responseData.includes('<soap:Fault>') || 
+                            responseData.includes('<SOAP-ENV:Fault>') ||
+                            responseData.includes('authentication failed');
+        
+        if (hasSoapFault) {
+            console.log('❌ Error de autenticación detectado en respuesta SOAP');
+            
+            // 🔥 MENSAJE GENÉRICO Y CLARO
             return res.status(401).json({
                 success: false,
                 error: 'Credenciales incorrectas',
-                mensaje: errorMsg
+                mensaje: 'Usuario o contraseña incorrectos. Por favor verifica tus datos.',
+                detalle: 'Asegúrate de usar tu correo y contraseña de Zimbra.'
             });
         }
 
-        const tokenMatch = authResponse.data.match(/<authToken>(.*?)<\/authToken>/);
+        // Verificar que se recibió un token
+        const tokenMatch = responseData.match(/<authToken>(.*?)<\/authToken>/);
         if (!tokenMatch) {
             console.log('❌ No se encontró token en la respuesta');
             return res.status(500).json({
                 success: false,
-                error: 'Error obteniendo token de Zimbra'
+                error: 'Error en el servidor',
+                mensaje: 'No se pudo completar la autenticación. Intenta nuevamente.'
             });
         }
+        
         const zimbraToken = tokenMatch[1];
         console.log(`✅ Token obtenido (${zimbraToken.length} caracteres)`);
 
@@ -256,45 +264,53 @@ router.post('/login', async (req, res) => {
         });
 
     } catch (error) {
+        console.error('========================================');
         console.error('❌ ERROR EN LOGIN:');
         console.error(`   Mensaje: ${error.message}`);
+        console.error(`   Código: ${error.code}`);
         
-        if (error.code === 'ENOTFOUND') {
-            console.error('   ⚠️ No se encontró el servidor Zimbra');
-            return res.status(500).json({
-                success: false,
-                error: 'No se pudo conectar al servidor Zimbra',
-                mensaje: 'Verifica que el servidor esté accesible'
-            });
-        }
-        
-        if (error.code === 'ECONNREFUSED') {
-            console.error('   ⚠️ Conexión rechazada por el servidor Zimbra');
-            return res.status(500).json({
-                success: false,
-                error: 'El servidor Zimbra rechazó la conexión',
-                mensaje: 'Verifica que el servidor esté funcionando'
-            });
-        }
-
         if (error.response) {
             console.error(`   Status: ${error.response.status}`);
-            console.error(`   Data: ${error.response.data?.substring(0, 200)}`);
+            const responseData = error.response.data || '';
+            
+            // Verificar si es error de autenticación
+            const isAuthError = responseData.includes('authentication failed') || 
+                               responseData.includes('AUTH_FAILED') ||
+                               responseData.includes('soap:Fault');
+            
+            if (isAuthError) {
+                console.log('✅ Error de autenticación detectado en catch');
+                
+                // 🔥 MENSAJE GENÉRICO Y CLARO
+                return res.status(401).json({
+                    success: false,
+                    error: 'Credenciales incorrectas',
+                    mensaje: 'Usuario o contraseña incorrectos. Por favor verifica tus datos.',
+                    detalle: 'Asegúrate de usar tu correo y contraseña de Zimbra.'
+                });
+            }
+        }
+        
+        if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+            console.error('   ⚠️ Error de conexión con Zimbra');
+            return res.status(503).json({
+                success: false,
+                error: 'Servicio no disponible',
+                mensaje: 'No pudimos conectar con el servidor de autenticación.',
+                detalle: 'Verifica tu conexión de red o intenta más tarde.'
+            });
         }
 
         console.error('========================================\n');
-        
         res.status(500).json({
             success: false,
-            error: 'Error de conexión con el servidor Zimbra',
-            mensaje: error.message
+            error: 'Error del servidor',
+            mensaje: 'Ocurrió un error inesperado. Intenta nuevamente.',
+            detalle: 'Si el problema persiste, contacta al administrador.'
         });
     }
 });
 
-// ============================================================
-// ENDPOINT: Verificar token de Zimbra
-// ============================================================
 router.post('/verificar', async (req, res) => {
     const { token } = req.body;
 

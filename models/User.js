@@ -2,9 +2,6 @@
 import mongoose from 'mongoose';
 
 const userSchema = new mongoose.Schema({
-  // ============================================================
-  // DATOS DEL USUARIO (se sincronizan con Zimbra)
-  // ============================================================
   nombre: {
     type: String,
     required: true
@@ -14,15 +11,10 @@ const userSchema = new mongoose.Schema({
     required: true,
     unique: true
   },
-  
   password: {
     type: String,
     default: 'zimbra_user'
   },
-  
-  // ============================================================
-  // DATOS DE ZIMBRA
-  // ============================================================
   zimbraUid: {
     type: String,
     unique: true,
@@ -37,15 +29,11 @@ const userSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
-  
-  // ============================================================
-  // ROL Y PERMISOS
-  // ============================================================
   rol: {
     type: String,
-    enum: ['jefe', 'empleado', 'cliente'],
+    enum: ['supervisor', 'tecnico', 'usuario'],
     required: true,
-    default: 'cliente'  // ⚠️ ROL POR DEFECTO: CLIENTE
+    default: 'usuario'
   },
   telefono: String,
   avatar: String,
@@ -53,10 +41,6 @@ const userSchema = new mongoose.Schema({
     type: Number,
     default: 1
   },
-  
-  // ============================================================
-  // DATOS DE TRABAJO
-  // ============================================================
   horasTrabajadasHoy: {
     type: Number,
     default: 0
@@ -66,7 +50,6 @@ const userSchema = new mongoose.Schema({
     ref: 'Tarjeta'
   }],
   ultimoRegistroHoras: Date,
-  
   configuracionTolerancia: {
     autoAprobarHasta: {
       type: Number,
@@ -77,11 +60,10 @@ const userSchema = new mongoose.Schema({
       default: true
     }
   },
-  
   configuracionAutoCierre: {
     revisarColumna: {
       type: String,
-      enum: ['revision_cliente', 'revision_jefe', 'ambas'],
+      enum: ['revision_cliente', 'revision_supervisor', 'ambas'],
       default: 'revision_cliente'
     },
     diasMaximosCliente: {
@@ -90,7 +72,7 @@ const userSchema = new mongoose.Schema({
       min: 1,
       max: 30
     },
-    diasMaximosJefe: {
+    diasMaximosSupervisor: {
       type: Number,
       default: 3,
       min: 1,
@@ -98,7 +80,7 @@ const userSchema = new mongoose.Schema({
     },
     accionAuto: {
       type: String,
-      enum: ['finalizar', 'notificar_jefe', 'escalar', 'reabrir'],
+      enum: ['finalizar', 'notificar_supervisor', 'escalar', 'reabrir'],
       default: 'finalizar'
     },
     notificarAntesDias: {
@@ -116,7 +98,30 @@ const userSchema = new mongoose.Schema({
       ref: 'User'
     }]
   },
-  
+  // 🔥 NUEVO: Solicitudes rápidas predefinidas
+  solicitudesPredefinidas: [{
+    titulo: {
+      type: String,
+      required: true
+    },
+    descripcion: {
+      type: String,
+      default: ''
+    },
+    prioridad: {
+      type: String,
+      enum: ['baja', 'media', 'alta', 'urgente'],
+      default: 'media'
+    },
+    activo: {
+      type: Boolean,
+      default: true
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   activo: {
     type: Boolean,
     default: true

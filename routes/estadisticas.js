@@ -1,11 +1,12 @@
+// routes/estadisticas.js
 import express from 'express';
 import Tarjeta from '../models/Tarjeta.js';
 import User from '../models/User.js';
-import { protect, jefeOnly } from '../middleware/auth.js';
+import { protect, supervisorOnly } from '../middleware/auth.js';
 
 const router = express.Router();
 
-router.get('/', protect, jefeOnly, async (req, res) => {
+router.get('/', protect, supervisorOnly, async (req, res) => {
   try {
     const fechaInicio = new Date();
     fechaInicio.setDate(fechaInicio.getDate() - 30);
@@ -26,7 +27,7 @@ router.get('/', protect, jefeOnly, async (req, res) => {
       { $sort: { _id: 1 } }
     ]);
     
-    const productividadEmpleados = await Tarjeta.aggregate([
+    const productividadTecnicos = await Tarjeta.aggregate([
       { $match: { asignadoA: { $ne: null }, estado: 'completada' } },
       { $group: {
           _id: '$asignadoA',
@@ -39,7 +40,7 @@ router.get('/', protect, jefeOnly, async (req, res) => {
           from: 'users',
           localField: '_id',
           foreignField: '_id',
-          as: 'empleado'
+          as: 'tecnico'
         }
       }
     ]);
@@ -82,7 +83,7 @@ router.get('/', protect, jefeOnly, async (req, res) => {
     res.json({
       tareasPorEstado,
       horasPorDia,
-      productividadEmpleados,
+      productividadEmpleados: productividadTecnicos,
       tareasNocturnas,
       tareasPorTipo,
       burndown,

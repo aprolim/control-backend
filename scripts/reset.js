@@ -1,16 +1,16 @@
-// scripts/reset-completo.js
+// scripts/reset.js
 // 
 // PROPÓSITO: Resetear la base de datos para el sistema de login Zimbra
 // 
 // REGLAS:
-//   - Rol por defecto: cliente
-//   - Jefe inicial: grover.plaza@senado.gob.bo (se crea automáticamente)
-//   - Solo jefes pueden asignar roles
-//   - Siempre debe haber al menos un jefe
+//   - Rol por defecto: usuario
+//   - Supervisor inicial: grover.plaza@senado.gob.bo (se crea automáticamente)
+//   - Solo supervisores pueden asignar roles
+//   - Siempre debe haber al menos un supervisor
 //   - El resto de usuarios se crean al primer login con Zimbra
 //
 // USO:
-//   node scripts/reset-completo.js
+//   node scripts/reset.js
 //
 
 import mongoose from 'mongoose';
@@ -24,10 +24,10 @@ dotenv.config();
 // CONFIGURACIÓN
 // ============================================================
 
-const JEFE_INICIAL = {
+const SUPERVISOR_INICIAL = {
     email: 'grover.plaza@senado.gob.bo',
     nombre: 'GROVER PLAZA QUIROGA',
-    rol: 'jefe',
+    rol: 'supervisor',
     zimbraUid: 'grover.plaza',
     telefono: '',
     password: 'zimbra_user'
@@ -68,54 +68,54 @@ async function resetCompleto() {
         console.log(`   ✅ Usuarios eliminados: ${userDeleteResult.deletedCount}`);
         console.log(`   ✅ Tarjetas eliminadas: ${tarjetaDeleteResult.deletedCount}\n`);
 
-        // 4. Crear JEFE INICIAL
-        console.log('👔 Creando JEFE INICIAL...');
-        const jefe = new User({
-            nombre: JEFE_INICIAL.nombre,
-            email: JEFE_INICIAL.email,
-            rol: JEFE_INICIAL.rol,
-            zimbraUid: JEFE_INICIAL.zimbraUid,
-            telefono: JEFE_INICIAL.telefono,
-            password: JEFE_INICIAL.password,
+        // 4. Crear SUPERVISOR INICIAL
+        console.log('👔 Creando SUPERVISOR INICIAL...');
+        const supervisor = new User({
+            nombre: SUPERVISOR_INICIAL.nombre,
+            email: SUPERVISOR_INICIAL.email,
+            rol: SUPERVISOR_INICIAL.rol,
+            zimbraUid: SUPERVISOR_INICIAL.zimbraUid,
+            telefono: SUPERVISOR_INICIAL.telefono,
+            password: SUPERVISOR_INICIAL.password,
             activo: true,
             configuracionAutoCierre: {
                 habilitado: true,
                 revisarColumna: 'revision_cliente',
                 diasMaximosCliente: 5,
-                diasMaximosJefe: 3,
+                diasMaximosSupervisor: 3,
                 accionAuto: 'finalizar',
                 notificarAntesDias: 1,
                 excepcionesEmpleados: []
             }
         });
-        await jefe.save();
-        console.log(`   ✅ ${jefe.email} - ${jefe.rol}\n`);
+        await supervisor.save();
+        console.log(`   ✅ ${supervisor.email} - ${supervisor.rol}\n`);
 
         // 5. MOSTRAR RESUMEN
         console.log('╔════════════════════════════════════════════════════════════════╗');
         console.log('║  📊 RESUMEN FINAL                                            ║');
         console.log('╠════════════════════════════════════════════════════════════════╣');
         console.log(`║  Total usuarios: 1                                           ║`);
-        console.log(`║  ├─ 👔 Jefes:     1                                         ║`);
-        console.log(`║  ├─ 👷 Empleados: 0 (se crean al primer login)              ║`);
-        console.log(`║  └─ 👤 Clientes:  0 (se crean al primer login)              ║`);
+        console.log(`║  ├─ 👔 Supervisores: 1                                      ║`);
+        console.log(`║  ├─ 👷 Técnicos:    0 (se crean al primer login)            ║`);
+        console.log(`║  └─ 👤 Usuarios:    0 (se crean al primer login)            ║`);
         console.log('╠════════════════════════════════════════════════════════════════╣');
-        console.log(`║  👑 JEFE INICIAL: ${JEFE_INICIAL.email}`);
+        console.log(`║  👑 SUPERVISOR INICIAL: ${SUPERVISOR_INICIAL.email}`);
         console.log('╠════════════════════════════════════════════════════════════════╣');
         console.log('║  🔑 Para iniciar sesión usa tus credenciales de Zimbra       ║');
-        console.log('║  📧 El jefe inicial es: grover.plaza@senado.gob.bo           ║');
+        console.log('║  📧 El supervisor inicial es: grover.plaza@senado.gob.bo     ║');
         console.log('║  📌 Nuevos usuarios se crean automáticamente al loguearse    ║');
-        console.log('║  📌 Rol por defecto: cliente                                ║');
+        console.log('║  📌 Rol por defecto: usuario                                ║');
         console.log('╚════════════════════════════════════════════════════════════════╝');
         console.log('\n');
 
         // 6. DIAGNÓSTICO FINAL
-        const countJefes = await User.countDocuments({ rol: 'jefe', activo: true });
-        if (countJefes === 0) {
-            console.warn('⚠️ ¡ADVERTENCIA! No hay jefes en el sistema.');
-            console.warn('   Esto puede causar problemas. Asegúrate de tener al menos un jefe.');
+        const countSupervisores = await User.countDocuments({ rol: 'supervisor', activo: true });
+        if (countSupervisores === 0) {
+            console.warn('⚠️ ¡ADVERTENCIA! No hay supervisores en el sistema.');
+            console.warn('   Esto puede causar problemas. Asegúrate de tener al menos un supervisor.');
         } else {
-            console.log(`✅ Verificación: ${countJefes} jefe(s) en el sistema (mínimo requerido: 1)`);
+            console.log(`✅ Verificación: ${countSupervisores} supervisor(es) en el sistema (mínimo requerido: 1)`);
         }
 
         console.log('\n✨ Base de datos inicializada exitosamente');

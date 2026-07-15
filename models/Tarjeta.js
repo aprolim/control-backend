@@ -1,3 +1,4 @@
+// models/Tarjeta.js
 import mongoose from 'mongoose';
 
 const registroHorasSchema = new mongoose.Schema({
@@ -57,13 +58,14 @@ const tarjetasSchema = new mongoose.Schema({
   descripcion: String,
   tipo: {
     type: String,
-    enum: ['solicitud_cliente', 'tarea_extra', 'asignacion_jefe'],
+    enum: ['solicitud_cliente', 'tarea_extra', 'asignacion_supervisor'],
     required: true
   },
   
   asignadaPor: {
     type: String,
-    enum: ['auto', 'jefe', 'empleado']
+    enum: ['auto', 'supervisor', 'empleado'],
+    default: 'auto'
   },
   asignadoA: {
     type: mongoose.Schema.Types.ObjectId,
@@ -76,7 +78,7 @@ const tarjetasSchema = new mongoose.Schema({
   
   estado: {
     type: String,
-    enum: ['pendiente', 'en_progreso', 'revision_jefe', 'revision_cliente', 'finalizada'],
+    enum: ['pendiente', 'en_progreso', 'revision_supervisor', 'revision_cliente', 'finalizada'],
     default: 'pendiente'
   },
   
@@ -93,7 +95,6 @@ const tarjetasSchema = new mongoose.Schema({
     max: 100
   },
   
-  // ✅ NUEVO CAMPO: Tiempo acumulado trabajado (en minutos)
   tiempoAcumulado: {
     type: Number,
     default: 0
@@ -119,7 +120,7 @@ const tarjetasSchema = new mongoose.Schema({
     default: 0
   },
   
-  tiempoSugeridoJefe: {
+  tiempoSugeridoSupervisor: {
     type: Number,
     default: 0
   },
@@ -130,19 +131,19 @@ const tarjetasSchema = new mongoose.Schema({
   
   fechaInicioReal: Date,
   fechaEstimadaFin: Date,
-  fechaUltimaReanudacion: Date, // ✅ NUEVO: Guarda cuándo se reanudó por última vez
+  fechaUltimaReanudacion: Date,
   
   fechaLimite: Date,
   fechaInicio: Date,
   fechaCompletadaEmpleado: Date,
-  fechaRevisionJefe: Date,
+  fechaRevisionSupervisor: Date,
   fechaRevisionCliente: Date,
   fechaFinalizada: Date,
   
-  fechaExpiracionRevisionJefe: Date,
+  fechaExpiracionRevisionSupervisor: Date,
   fechaExpiracionCalificacion: Date,
   
-  revisionJefe: {
+  revisionSupervisor: {
     type: String,
     enum: ['pendiente', 'aprobada'],
     default: 'pendiente'

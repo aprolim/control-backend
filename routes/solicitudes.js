@@ -1,9 +1,9 @@
+// routes/solicitudes.js
 import express from 'express';
 import Tarjeta from '../models/Tarjeta.js';
 
 const router = express.Router();
 
-// Solicitud pública (sin login)
 router.post('/publicas', async (req, res) => {
   try {
     const { titulo, descripcion, clienteInfo } = req.body;
