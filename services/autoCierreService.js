@@ -3,14 +3,175 @@ import Tarjeta from '../models/Tarjeta.js';
 import User from '../models/User.js';
 
 // ============================================================
-// ALMACENAR TIMEOUTS POR TAREA (para cancelar si es necesario)
+// ALMACENAR TIMEOUTS POR TAREA
 // ============================================================
 export const timeouts = new Map();
 
 // ============================================================
-// AUTO-FINALIZAR TAREA (EVENTO REAL)
+// FUNCIÓN PARA CALCULAR EFICIENCIA
 // ============================================================
-export const autoFinalizarTarea = async (tareaId, io, clients) => {
+const calcularEficiencia = (tiempoEstimado, tiempoReal) => {
+  if (!tiempoEstimado || tiempoEstimado <= 0) return 'esperado';
+  
+  const diferencia = ((tiempoReal - tiempoEstimado) / tiempoEstimado) * 100;
+  
+  if (diferencia <= -20) return 'mayor_a_esperado';
+  if (diferencia <= 20) return 'esperado';
+  if (diferencia <= 50) return 'menor_a_esperado';
+  return 'critico';
+};
+
+// ============================================================
+// FUNCIÓN PARA REGISTRAR LOG DE TIEMPOS
+// ============================================================
+export const registrarLogTiempo = async (tarjetaId, data) => {
+  try {
+    const tarjeta = await Tarjeta.findById(tarjetaId);
+    if (!tarjeta) return null;
+    
+    const logEntry = {
+      timestamp: new Date(),
+      tipo: data.tipo,
+      tiempoMinutos: data.tiempoMinutos || 0,
+      tiempoAnterior: data.tiempoAnterior || 0,
+      tiempoReal: data.tiempoReal || 0,
+      diferencia: data.diferencia || 0,
+      progreso: data.progreso || 0,
+      tiempoTrabajado: data.tiempoTrabajado || 0,
+      por: data.por || 'Sistema',
+      rol: data.rol || 'Sistema',
+      motivo: data.motivo || '',
+      eficiencia: data.eficiencia || 'esperado',
+      tiempoRestante: data.tiempoRestante || 0,
+      tecnicoAnterior: data.tecnicoAnterior || '',
+      tecnicoNuevo: data.tecnicoNuevo || '',
+      alerta: data.alerta || false
+    };
+    
+    tarjeta.logTiempos.push(logEntry);
+    await tarjeta.save();
+    
+    return logEntry;
+  } catch (error) {
+    console.error('❌ Error registrando log de tiempo:', error);
+    return null;
+  }
+};
+
+// ============================================================
+// FUNCIÓN PARA CALCULAR TIEMPO RESTANTE
+// ============================================================
+const calcularTiempoRestante = (tarjeta) => {
+  const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado || 0;
+  const tiempoTrabajado = tarjeta.tiempoAcumulado || 0;
+  return Math.max(0, tiempoEstimado - tiempoTrabajado);
+};
+
+// ============================================================
+// FUNCIÓN PARA RECALCULAR TIEMPO ESTIMADO BASADO EN PROGRESO
+// ============================================================
+export const recalcularTiempoPorProgreso = async (tarjetaId, io, clients, comentarioTecnico = '') => {
+  try {
+    const tarjeta = await Tarjeta.findById(tarjetaId).populate('asignadoA', 'nombre email rol');
+    if (!tarjeta) return null;
+    
+    let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+    if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+      tiempoTotalTrabajado += minutosDesdeReanudacion;
+    }
+    
+    const progresoActual = tarjeta.porcentajeCompletado || 0;
+    const tiempoEstimadoActual = tarjeta.tiempoEstimadoEmpleado || 0;
+    
+    if (progresoActual <= 0 || tiempoEstimadoActual <= 0) return null;
+    
+    const nuevoEstimado = Math.round((tiempoTotalTrabajado / progresoActual) * 100);
+    
+    if (nuevoEstimado < 1) return null;
+    
+    const diferencia = nuevoEstimado - tiempoEstimadoActual;
+    
+    if (Math.abs(diferencia) <= 10) return null;
+    
+    const eficiencia = calcularEficiencia(tiempoEstimadoActual, tiempoTotalTrabajado);
+    const esCritico = eficiencia === 'critico';
+    
+    console.log(`📊 RECALCULANDO TIEMPO: ${tarjeta.titulo}`);
+    console.log(`   Progreso: ${progresoActual}%`);
+    console.log(`   Tiempo trabajado: ${tiempoTotalTrabajado} min`);
+    console.log(`   Estimado anterior: ${tiempoEstimadoActual} min`);
+    console.log(`   Nuevo estimado: ${nuevoEstimado} min`);
+    console.log(`   Diferencia: ${diferencia > 0 ? '+' : ''}${diferencia} min`);
+    console.log(`   Eficiencia: ${eficiencia}`);
+    console.log(`   Comentario técnico: ${comentarioTecnico || '(sin comentario)'}`);
+    
+    const tiempoAnterior = tiempoEstimadoActual;
+    
+    tarjeta.tiempoEstimadoEmpleado = nuevoEstimado;
+    
+    const tiempoRestante = Math.max(0, nuevoEstimado - tiempoTotalTrabajado);
+    tarjeta.fechaEstimadaFin = new Date(Date.now() + tiempoRestante * 60 * 1000);
+    
+    await tarjeta.save();
+    
+    const motivoFinal = comentarioTecnico.trim() 
+      ? comentarioTecnico.trim() 
+      : `Progreso ${progresoActual}% en ${tiempoTotalTrabajado} min`;
+    
+    const logEntry = await registrarLogTiempo(tarjeta._id, {
+      tipo: 'recalculado_progreso',
+      progreso: progresoActual,
+      tiempoTrabajado: tiempoTotalTrabajado,
+      tiempoMinutos: nuevoEstimado,
+      tiempoAnterior: tiempoAnterior,
+      diferencia: diferencia,
+      eficiencia: eficiencia,
+      tiempoRestante: nuevoEstimado - tiempoTotalTrabajado,
+      por: tarjeta.asignadoA?.nombre || 'Sistema',
+      rol: tarjeta.asignadoA?.rol || 'Sistema',
+      motivo: motivoFinal,
+      alerta: esCritico
+    });
+    
+    if (esCritico && io && clients) {
+      const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id');
+      for (const supervisor of supervisores) {
+        const socket = clients.get(supervisor._id.toString());
+        if (socket) {
+          socket.emit('alerta-progreso-critico', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            tecnico: tarjeta.asignadoA?.nombre || 'Sin asignar',
+            progreso: progresoActual,
+            tiempoTrabajado: tiempoTotalTrabajado,
+            tiempoEstimadoAnterior: tiempoAnterior,
+            tiempoEstimadoNuevo: nuevoEstimado,
+            eficiencia: eficiencia,
+            motivo: motivoFinal,
+            mensaje: `⚠️ La tarea "${tarjeta.titulo}" tiene un progreso crítico: ${progresoActual}% en ${tiempoTotalTrabajado} min (estimado ${nuevoEstimado} min)`
+          });
+        }
+      }
+    }
+    
+    return { nuevoEstimado, diferencia, eficiencia, logEntry };
+    
+  } catch (error) {
+    console.error('❌ Error recalculando tiempo por progreso:', error);
+    return null;
+  }
+};
+
+// ============================================================
+// AUTO-FINALIZAR TAREA
+// 🔥 CAMBIO: ahora acepta un parámetro opcional `tiempoRealForzado`
+//    para congelar el tiempo real al momento de programar el auto-cierre.
+//    Esto evita que retrasos del event loop inflen el tiempo registrado.
+// ============================================================
+export const autoFinalizarTarea = async (tareaId, io, clients, tiempoRealForzado = null) => {
   try {
     console.log(`🔥 [AUTO-CIERRE] Evento real para tarea: ${tareaId}`);
     
@@ -22,7 +183,6 @@ export const autoFinalizarTarea = async (tareaId, io, clients) => {
       return;
     }
     
-    // Verificar que sigue activa
     if (tarjeta.estado !== 'en_progreso') {
       console.log(`⏭️ Tarea ${tareaId} ya no está en progreso (${tarjeta.estado})`);
       timeouts.delete(tareaId);
@@ -31,142 +191,170 @@ export const autoFinalizarTarea = async (tareaId, io, clients) => {
     
     if (tarjeta.estadoProgreso !== 'activa') {
       console.log(`⏭️ Tarea ${tareaId} está pausada, reprogramando...`);
-      // Si está pausada, reprogramar con el tiempo restante
-      const tiempoRestante = Math.max(0, tarjeta.tiempoEstimadoEmpleado - (tarjeta.tiempoAcumulado || 0));
+      const tiempoRestante = calcularTiempoRestante(tarjeta);
       if (tiempoRestante > 0) {
         programarAutoFinalizacion(tareaId, tiempoRestante, io, clients);
       }
       return;
     }
     
-    // Calcular tiempo real trabajado
-    let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
-    if (tarjeta.fechaUltimaReanudacion) {
-      const ahora = new Date();
-      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
-      const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
-      tiempoTotalTrabajado += minutosDesdeReanudacion;
+    // ============================================================
+    // 🔥 CALCULAR TIEMPO TOTAL TRABAJADO
+    // ============================================================
+    let tiempoTotalTrabajado;
+    
+    if (tiempoRealForzado !== null && tiempoRealForzado !== undefined) {
+      // 🔥 NUEVO: Usar el tiempo congelado al momento de programar el auto-cierre.
+      // Esto evita que retrasos del event loop inflen el tiempo registrado.
+      tiempoTotalTrabajado = tiempoRealForzado;
+      console.log(`   🔒 Usando tiempo CONGELADO: ${tiempoTotalTrabajado} min`);
+      console.log(`      (evita que retrasos del event loop inflen el tiempo)`);
+    } else {
+      // Cálculo normal (para auto-finalizaciones forzadas manualmente)
+      tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+      if (tarjeta.fechaUltimaReanudacion) {
+        const ahora = new Date();
+        const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+        const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+        tiempoTotalTrabajado += minutosDesdeReanudacion;
+      }
+      console.log(`   📐 Calculando tiempo real desde fechaUltimaReanudacion`);
     }
     
-    console.log(`✅ AUTO-FINALIZANDO: ${tarjeta.titulo}`);
-    console.log(`   Tiempo estimado: ${tarjeta.tiempoEstimadoEmpleado} min`);
-    console.log(`   Tiempo trabajado: ${tiempoTotalTrabajado} min`);
+    const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado || 0;
+    const diferencia = tiempoTotalTrabajado - tiempoEstimado;
+    const eficiencia = calcularEficiencia(tiempoEstimado, tiempoTotalTrabajado);
     
-    // Actualizar tarjeta
-    tarjeta.estado = 'revision_supervisor';
+    console.log(`✅ AUTO-FINALIZANDO: ${tarjeta.titulo}`);
+    console.log(`   Tiempo estimado: ${tiempoEstimado} min`);
+    console.log(`   Tiempo trabajado: ${tiempoTotalTrabajado} min`);
+    console.log(`   Diferencia: ${diferencia > 0 ? '+' : ''}${diferencia} min`);
+    console.log(`   Eficiencia: ${eficiencia}`);
+    
+    // 🔥 Finalizar directamente, sin pasar por revisión
+    tarjeta.estado = 'finalizada';
     tarjeta.fechaCompletadaEmpleado = new Date();
-    tarjeta.fechaRevisionSupervisor = new Date();
-    tarjeta.revisionSupervisor = 'pendiente';
-    tarjeta.fechaExpiracionRevisionSupervisor = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    tarjeta.fechaFinalizada = new Date();
     tarjeta.estadoProgreso = 'completada';
     tarjeta.porcentajeCompletado = 100;
     tarjeta.tiempoAcumulado = tiempoTotalTrabajado;
+    tarjeta.fechaUltimaPausa = null;
+    // 🔥 La calificación queda pendiente para que el cliente pueda calificar después (opcional)
+    tarjeta.estadoCalificacion = 'pendiente';
+    
+    const horasReales = Math.floor(tiempoTotalTrabajado / 60);
+    const minutosReales = tiempoTotalTrabajado % 60;
+    tarjeta.horasTotalesReales = horasReales;
+    tarjeta.minutosTotalesReales = minutosReales;
     
     await tarjeta.save();
     
-    // ============================================================
-    // 🔥 NOTIFICACIONES EN TIEMPO REAL VÍA WEBSOCKET
-    // ============================================================
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_auto_finalizada',
+      tiempoMinutos: tiempoEstimado,
+      tiempoReal: tiempoTotalTrabajado,
+      diferencia: diferencia,
+      eficiencia: eficiencia,
+      por: 'Sistema (auto-cierre)',
+      rol: 'Sistema',
+      motivo: `Auto-finalizada por cumplimiento de tiempo (${tiempoTotalTrabajado} min)`
+    });
     
     if (io && clients) {
-      // 1. NOTIFICAR AL TÉCNICO
+      // Notificar al técnico
       if (tarjeta.asignadoA) {
         const socketEmpleado = clients.get(tarjeta.asignadoA._id.toString());
         if (socketEmpleado) {
           socketEmpleado.emit('tarea-auto-finalizada', {
             tareaId: tarjeta._id,
             titulo: tarjeta.titulo,
-            mensaje: '✅ Tarea completada automáticamente (tiempo estimado cumplido)',
+            mensaje: `✅ Tarea completada automáticamente (${diferencia > 0 ? diferencia + ' min extra' : 'tiempo cumplido'})`,
             empleadoNombre: tarjeta.asignadoA.nombre,
-            tiempoEstimado: tarjeta.tiempoEstimadoEmpleado,
-            tiempoReal: tiempoTotalTrabajado
+            tiempoEstimado: tiempoEstimado,
+            tiempoReal: tiempoTotalTrabajado,
+            eficiencia: eficiencia
           });
           console.log(`   ✅ Socket emitido a técnico: ${tarjeta.asignadoA.nombre}`);
         }
       }
       
-      // 2. NOTIFICAR A TODOS LOS SUPERVISORES
-      const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id nombre');
-      for (const supervisor of supervisores) {
-        const socket = clients.get(supervisor._id.toString());
-        if (socket) {
-          socket.emit('tarea-lista-para-revision', {
-            tareaId: tarjeta._id,
-            titulo: tarjeta.titulo,
-            empleadoId: tarjeta.asignadoA?._id,
-            empleadoNombre: tarjeta.asignadoA?.nombre || 'Sin asignar',
-            tiempoEstimado: tarjeta.tiempoEstimadoEmpleado,
-            tiempoReal: tiempoTotalTrabajado,
-            mensaje: `📋 Tarea "${tarjeta.titulo}" lista para revisión (auto-finalizada)`
-          });
-          console.log(`   ✅ Socket emitido a supervisor: ${supervisor.nombre}`);
-        }
-      }
-      
-      // 3. NOTIFICAR AL CLIENTE (si tiene cuenta)
+      // Notificar al cliente si existe
       if (tarjeta.clienteInfo?.userId) {
         const socketCliente = clients.get(tarjeta.clienteInfo.userId.toString());
         if (socketCliente) {
-          socketCliente.emit('tarea-por-revisar', {
+          socketCliente.emit('tarea-finalizada-por-ti', {
             tareaId: tarjeta._id,
             titulo: tarjeta.titulo,
-            mensaje: `📋 Tu solicitud "${tarjeta.titulo}" está lista para revisión`
+            mensaje: `✅ Tu tarea "${tarjeta.titulo}" ha sido finalizada. Puedes calificarla cuando quieras.`
           });
-          console.log(`   ✅ Socket emitido a cliente: ${tarjeta.clienteInfo.userId}`);
         }
       }
       
-      // 4. NOTIFICACIÓN GENERAL (a todos los usuarios conectados)
+      // Broadcast general
       io.emit('estado-general-actualizado', {
         tareaId: tarjeta._id,
         titulo: tarjeta.titulo,
         estado: tarjeta.estado,
         porcentaje: 100,
         accion: 'auto-finalizada',
-        mensaje: `Tarea "${tarjeta.titulo}" auto-finalizada por tiempo cumplido`
+        mensaje: `Tarea "${tarjeta.titulo}" auto-finalizada`
       });
-      console.log(`   ✅ Socket emitido a todos los usuarios`);
+      
+      // 🔥 Notificar específicamente a supervisores para actualizar Kanban
+      const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id');
+      supervisores.forEach(sup => {
+        const socketSup = clients.get(sup._id.toString());
+        if (socketSup) {
+          socketSup.emit('kanban-actualizar', {
+            tareaId: tarjeta._id,
+            tarea: tarjeta,
+            accion: 'auto-finalizada',
+            mensaje: `✅ Tarea auto-finalizada: ${tarjeta.titulo}`
+          });
+        }
+      });
     }
     
-    // Limpiar timeout
     timeouts.delete(tareaId);
     console.log(`✅ [AUTO-CIERRE] Tarea ${tareaId} finalizada exitosamente`);
     
     return { success: true, tarjeta };
     
   } catch (error) {
-    console.error('❌ [AUTO-CIERRE] Error en autoFinalizarTarea:', error);
+    console.error('❌ [AUTO-CIERRE] Error:', error);
     timeouts.delete(tareaId);
     return { success: false, error: error.message };
   }
 };
 
 // ============================================================
-// PROGRAMAR AUTO-FINALIZACIÓN (SETTIMEOUT REAL)
+// PROGRAMAR AUTO-FINALIZACIÓN
+// 🔥 CAMBIO: ahora calcula y congela el tiempo real en el momento
+//    de programar, para que aunque el timer se retrase, el tiempo
+//    registrado sea exactamente el estimado.
 // ============================================================
 export const programarAutoFinalizacion = (tarjetaId, tiempoMinutos, io, clients) => {
-  // Cancelar timeout existente
   if (timeouts.has(tarjetaId)) {
     clearTimeout(timeouts.get(tarjetaId));
     timeouts.delete(tarjetaId);
-    console.log(`⏹️ Auto-finalización cancelada para tarea ${tarjetaId}`);
   }
   
-  // Si el tiempo es 0 o menor, no programar
-  if (!tiempoMinutos || tiempoMinutos <= 0) {
-    console.log(`⚠️ Tiempo inválido para tarea ${tarjetaId}: ${tiempoMinutos} min`);
-    return;
-  }
+  if (!tiempoMinutos || tiempoMinutos <= 0) return;
   
-  // Convertir a milisegundos y añadir 30 segundos de gracia
+  // 🔥 Margen de 30 segundos para dar tiempo a que el técnico finalice manualmente
   const tiempoMs = (tiempoMinutos * 60 * 1000) + (30 * 1000);
   
-  console.log(`⏰ Programando auto-finalización para tarea ${tarjetaId} en ${tiempoMinutos} minutos (${Math.floor(tiempoMs/1000)}s)`);
+  console.log(`⏰ Programando auto-finalización para tarea ${tarjetaId} en ${tiempoMinutos} minutos`);
+  console.log(`   🔒 Tiempo real a registrar: ${tiempoMinutos} min (congelado)`);
   
-  // Crear nuevo timeout
   const timeoutId = setTimeout(async () => {
     console.log(`🔥 [EVENTO] Timeout disparado para tarea ${tarjetaId}`);
-    await autoFinalizarTarea(tarjetaId, io, clients);
+    console.log(`   🔒 Pasando tiempo congelado: ${tiempoMinutos} min`);
+    
+    // 🔥 NUEVO: Pasar el tiempo congelado (el estimado) para que
+    // autoFinalizarTarea lo use en lugar de recalcularlo.
+    // Esto evita que retrasos del event loop inflen el tiempo registrado.
+    await autoFinalizarTarea(tarjetaId, io, clients, tiempoMinutos);
   }, tiempoMs);
   
   timeouts.set(tarjetaId, timeoutId);
@@ -186,7 +374,7 @@ export const cancelarAutoFinalizacion = (tarjetaId) => {
 };
 
 // ============================================================
-// VERIFICAR TAREAS HUÉRFANAS (al iniciar el servidor)
+// VERIFICAR TAREAS ACTIVAS AL INICIAR
 // ============================================================
 export const verificarTareasActivas = async (io, clients) => {
   try {
@@ -201,7 +389,6 @@ export const verificarTareasActivas = async (io, clients) => {
     console.log(`📊 Encontradas ${tareasActivas.length} tareas activas`);
     
     for (const tarjeta of tareasActivas) {
-      // Calcular tiempo trabajado
       let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
       
       if (tarjeta.fechaUltimaReanudacion) {
@@ -213,12 +400,12 @@ export const verificarTareasActivas = async (io, clients) => {
       
       const tiempoRestante = Math.max(0, tarjeta.tiempoEstimadoEmpleado - tiempoTotalTrabajado);
       
-      // Si ya excedió el tiempo, finalizar inmediatamente
       if (tiempoRestante <= 0) {
         console.log(`⚠️ Tarea ${tarjeta.titulo} ya excedió el tiempo, finalizando...`);
-        await autoFinalizarTarea(tarjeta._id, io, clients);
+        // 🔥 Para tareas que ya excedieron, usamos el tiempo estimado como congelado
+        // (no queremos que se registre tiempo extra por el retraso del servidor)
+        await autoFinalizarTarea(tarjeta._id, io, clients, tarjeta.tiempoEstimadoEmpleado);
       } else {
-        // Reprogramar con el tiempo restante
         console.log(`⏰ Reprogramando tarea ${tarjeta.titulo}: ${tiempoRestante} min restantes`);
         programarAutoFinalizacion(tarjeta._id, tiempoRestante, io, clients);
       }
@@ -232,15 +419,15 @@ export const verificarTareasActivas = async (io, clients) => {
 };
 
 // ============================================================
-// INICIAR SERVICIO (sin setInterval)
+// INICIAR SERVICIO
 // ============================================================
 export const iniciarAutoCierreService = (io, clients) => {
   console.log('⏰ [SERVICIO] Iniciando auto-cierre con eventos reales...');
   console.log(`   📡 io: ${io ? '✅ Disponible' : '❌ No disponible'}`);
   console.log(`   👥 clients: ${clients ? '✅ Disponible' : '❌ No disponible'}`);
   console.log(`   ⏱️ Usando setTimeout (eventos reales, no polling)`);
+  console.log(`   🔒 Tiempo real CONGELADO al programar (evita inflado por retrasos)`);
   
-  // Verificar tareas activas al iniciar
   setTimeout(() => {
     verificarTareasActivas(io, clients);
   }, 3000);

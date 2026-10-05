@@ -107,10 +107,12 @@ router.get('/auto-cierre/estadisticas', protect, supervisorOnly, async (req, res
       }
     ]);
     
+    const supervisor = await User.findOne({ rol: 'supervisor' });
+    
     res.json({
       totalAutoFinalizadas: stats.reduce((sum, s) => sum + s.count, 0),
       porMes: stats,
-      configuracionActual: (await User.findOne({ rol: 'supervisor' })).configuracionAutoCierre
+      configuracionActual: supervisor?.configuracionAutoCierre || {}
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -118,10 +120,198 @@ router.get('/auto-cierre/estadisticas', protect, supervisorOnly, async (req, res
 });
 
 // ============================================================
-// 🔥 SOLICITUDES PREDEFINIDAS
+// 🔥 NUEVO: NOTIFICACIONES (sonidos y visuales)
 // ============================================================
 
-// Obtener todas las solicitudes predefinidas del supervisor
+// Obtener la configuración de notificaciones
+router.get('/notificaciones', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('configuracionNotificaciones rol');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    
+    // Devolver la config del propio usuario
+    // Si es supervisor, devuelve la suya (que es la plantilla global)
+    // Si es técnico, devuelve la suya (que puede haber sido personalizada)
+    const configDefault = {
+      recordatorioPendientes: {
+        habilitado: true,
+        intervaloMinutos: 2,
+        sonidoHabilitado: true,
+        soloCuandoLibre: true
+      },
+      nuevaTareaPendiente: {
+        habilitado: true,
+        sonidoHabilitado: true
+      },
+      tareaAsignada: {
+        habilitado: true,
+        sonidoHabilitado: true
+      },
+      volumen: 0.5,
+      silenciarHasta: null
+    };
+    
+    res.json({
+      success: true,
+      configuracion: user.configuracionNotificaciones || configDefault,
+      rol: user.rol
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Actualizar configuración (supervisor puede actualizar la global para todos)
+router.put('/notificaciones', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    
+    const {
+      recordatorioPendientes,
+      nuevaTareaPendiente,
+      tareaAsignada,
+      volumen,
+      silenciarHasta
+    } = req.body;
+    
+    // Validar y construir la nueva configuración
+    const nuevaConfig = {
+      recordatorioPendientes: {
+        habilitado: recordatorioPendientes?.habilitado ?? true,
+        intervaloMinutos: Math.min(30, Math.max(1, parseInt(recordatorioPendientes?.intervaloMinutos) || 2)),
+        sonidoHabilitado: recordatorioPendientes?.sonidoHabilitado ?? true,
+        soloCuandoLibre: recordatorioPendientes?.soloCuandoLibre ?? true
+      },
+      nuevaTareaPendiente: {
+        habilitado: nuevaTareaPendiente?.habilitado ?? true,
+        sonidoHabilitado: nuevaTareaPendiente?.sonidoHabilitado ?? true
+      },
+      tareaAsignada: {
+        habilitado: tareaAsignada?.habilitado ?? true,
+        sonidoHabilitado: tareaAsignada?.sonidoHabilitado ?? true
+      },
+      volumen: Math.min(1, Math.max(0, parseFloat(volumen) || 0.5)),
+      silenciarHasta: silenciarHasta || null
+    };
+    
+    user.configuracionNotificaciones = nuevaConfig;
+    await user.save();
+    
+    console.log(`🔔 [Configuración] Notificaciones actualizadas para ${user.email} (rol: ${user.rol})`);
+    
+    // 🔥 Si es supervisor, actualizar TODOS los técnicos con la misma config base
+    // (excepto volumen y silenciarHasta, que son personales)
+    if (user.rol === 'supervisor') {
+      const tecnicos = await User.find({ rol: 'tecnico', activo: true });
+      
+      for (const tecnico of tecnicos) {
+        // Preservar volumen y silenciarHasta del técnico
+        const volumenTecnico = tecnico.configuracionNotificaciones?.volumen ?? 0.5;
+        const silenciarTecnico = tecnico.configuracionNotificaciones?.silenciarHasta ?? null;
+        
+        tecnico.configuracionNotificaciones = {
+          ...nuevaConfig,
+          volumen: volumenTecnico,
+          silenciarHasta: silenciarTecnico
+        };
+        
+        await tecnico.save();
+      }
+      
+      console.log(`   📢 Propagado a ${tecnicos.length} técnicos`);
+      
+      // Notificar a todos los técnicos por socket que su config cambió
+      const io = req.app.get('io');
+      const clients = req.app.get('clients');
+      
+      tecnicos.forEach(tec => {
+        const socket = clients.get(tec._id.toString());
+        if (socket) {
+          socket.emit('notificaciones-actualizadas', {
+            configuracion: tec.configuracionNotificaciones
+          });
+        }
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Configuración de notificaciones actualizada',
+      configuracion: user.configuracionNotificaciones
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando notificaciones:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Silenciar notificaciones por X minutos (para técnicos y supervisores)
+router.post('/notificaciones/silenciar', protect, async (req, res) => {
+  try {
+    const { minutos } = req.body;
+    const minutosValidos = Math.min(480, Math.max(1, parseInt(minutos) || 30));
+    
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    
+    if (!user.configuracionNotificaciones) {
+      user.configuracionNotificaciones = {};
+    }
+    
+    user.configuracionNotificaciones.silenciarHasta = new Date(Date.now() + minutosValidos * 60 * 1000);
+    await user.save();
+    
+    console.log(`🔕 [Notificaciones] ${user.email} silenció por ${minutosValidos} min`);
+    
+    res.json({
+      success: true,
+      message: `Notificaciones silenciadas por ${minutosValidos} minutos`,
+      silenciarHasta: user.configuracionNotificaciones.silenciarHasta
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Reactivar notificaciones (quitar silencio)
+router.post('/notificaciones/reactivar', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    
+    if (!user.configuracionNotificaciones) {
+      user.configuracionNotificaciones = {};
+    }
+    
+    user.configuracionNotificaciones.silenciarHasta = null;
+    await user.save();
+    
+    console.log(`🔔 [Notificaciones] ${user.email} reactivó notificaciones`);
+    
+    res.json({
+      success: true,
+      message: 'Notificaciones reactivadas'
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// SOLICITUDES PREDEFINIDAS (existente)
+// ============================================================
+
 router.get('/solicitudes-predefinidas', protect, supervisorOnly, async (req, res) => {
   try {
     const supervisor = await User.findOne({ rol: 'supervisor', activo: true });
@@ -139,7 +329,6 @@ router.get('/solicitudes-predefinidas', protect, supervisorOnly, async (req, res
   }
 });
 
-// Crear una nueva solicitud predefinida
 router.post('/solicitudes-predefinidas', protect, supervisorOnly, async (req, res) => {
   try {
     const { titulo, descripcion, prioridad } = req.body;
@@ -157,7 +346,6 @@ router.post('/solicitudes-predefinidas', protect, supervisorOnly, async (req, re
       return res.status(404).json({ message: 'Supervisor no encontrado' });
     }
     
-    // Verificar que no exista una solicitud con el mismo título
     const existe = supervisor.solicitudesPredefinidas.some(
       s => s.titulo.toLowerCase() === titulo.trim().toLowerCase() && s.activo !== false
     );
@@ -178,7 +366,6 @@ router.post('/solicitudes-predefinidas', protect, supervisorOnly, async (req, re
     
     await supervisor.save();
     
-    // Obtener la solicitud recién creada
     const nueva = supervisor.solicitudesPredefinidas[supervisor.solicitudesPredefinidas.length - 1];
     
     res.status(201).json({
@@ -191,7 +378,6 @@ router.post('/solicitudes-predefinidas', protect, supervisorOnly, async (req, re
   }
 });
 
-// Actualizar una solicitud predefinida
 router.put('/solicitudes-predefinidas/:id', protect, supervisorOnly, async (req, res) => {
   try {
     const { id } = req.params;
@@ -241,7 +427,6 @@ router.put('/solicitudes-predefinidas/:id', protect, supervisorOnly, async (req,
   }
 });
 
-// Eliminar una solicitud predefinida (desactivar)
 router.delete('/solicitudes-predefinidas/:id', protect, supervisorOnly, async (req, res) => {
   try {
     const { id } = req.params;
@@ -263,7 +448,6 @@ router.delete('/solicitudes-predefinidas/:id', protect, supervisorOnly, async (r
       });
     }
     
-    // Desactivar en lugar de eliminar
     supervisor.solicitudesPredefinidas[index].activo = false;
     
     await supervisor.save();

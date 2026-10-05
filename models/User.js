@@ -98,6 +98,70 @@ const userSchema = new mongoose.Schema({
       ref: 'User'
     }]
   },
+  
+  // ============================================================
+  // 🔥 NUEVO: Configuración de notificaciones (sonidos y visuales)
+  // ============================================================
+  configuracionNotificaciones: {
+    // Notificación 1: Recordatorio de tareas pendientes
+    recordatorioPendientes: {
+      habilitado: {
+        type: Boolean,
+        default: true
+      },
+      intervaloMinutos: {
+        type: Number,
+        default: 2,       // cada cuántos minutos sonar
+        min: 1,
+        max: 30
+      },
+      sonidoHabilitado: {
+        type: Boolean,
+        default: true
+      },
+      soloCuandoLibre: {
+        type: Boolean,
+        default: true    // solo suena si el técnico no tiene tarea activa
+      }
+    },
+    
+    // Notificación 2: Nueva tarea entra a pendiente
+    nuevaTareaPendiente: {
+      habilitado: {
+        type: Boolean,
+        default: true
+      },
+      sonidoHabilitado: {
+        type: Boolean,
+        default: true
+      }
+    },
+    
+    // Notificación 3: Supervisor asigna tarea específica
+    tareaAsignada: {
+      habilitado: {
+        type: Boolean,
+        default: true
+      },
+      sonidoHabilitado: {
+        type: Boolean,
+        default: true
+      }
+    },
+    
+    // Configuración global de sonido
+    volumen: {
+      type: Number,
+      default: 0.5,
+      min: 0,
+      max: 1
+    },
+    silenciarHasta: {
+      type: Date,
+      default: null
+    }
+  },
+  
   // 🔥 NUEVO: Solicitudes rápidas predefinidas
   solicitudesPredefinidas: [{
     titulo: {

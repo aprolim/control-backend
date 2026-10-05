@@ -18,7 +18,7 @@ echo. >> "%ARCHIVO_SALIDA%"
 set ARCHIVOS_PROCESADOS=0
 
 :: Extensiones de imagen a excluir
-set "EXTENSIONES_IMAGEN=.jpg .jpeg .png .gif .bmp .tiff .tif .webp .svg .ico .raw .psd .ai .eps"
+set "EXTENSIONES_IMAGEN=.jpg .jpeg .png .gif .bmp .tiff .tif .webp .svg .ico .raw .psd .ai .eps .env"
 
 :: Procesar archivos recursivamente pero excluir node_modules, .git y package-lock.json
 for /f "delims=" %%F in ('dir /s /b /a-d * ^| findstr /v /i "\\node_modules\\ \\.git\\ \\.nuxt\\ package-lock\.json"') do (

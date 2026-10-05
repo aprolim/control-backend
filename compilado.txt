@@ -1,0 +1,4422 @@
+COMPILADO DE ARCHIVOS 
+ 
+ 
+================================= 
+.env 
+================================= 
+ 
+[ARCHIVO DE IMAGEN - CONTENIDO NO MOSTRADO] 
+ 
+================================= 
+.gitignore 
+================================= 
+ 
+# Nuxt dev/build outputs
+.output
+.data
+.nuxt
+.nitro
+.cache
+dist
+
+# Node dependencies
+node_modules
+
+# Logs
+logs
+*.log
+
+# Misc
+.DS_Store
+.fleet
+.idea
+
+# Local env files
+.env
+.env.*
+!.env.example
+ 
+================================= 
+package.json 
+================================= 
+ 
+{
+  "name": "control-personal-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Backend para sistema de control de personal",
+  "main": "server.js",
+  "scripts": {
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "reset": "node scripts/reset.js"
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "bcryptjs": "^2.4.3",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.2",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^8.24.1",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.3"
+  }
+}
+ 
+================================= 
+server.js 
+================================= 
+ 
+// server.js
+import express from 'express';
+import mongoose from 'mongoose';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import authRoutes from './routes/auth.js';
+import tarjetaRoutes from './routes/tarjetas.js';
+import empleadoRoutes from './routes/empleados.js';
+import estadisticasRoutes from './routes/estadisticas.js';
+import solicitudRoutes from './routes/solicitudes.js';
+import configuracionRoutes from './routes/configuracion.js';
+import { iniciarAutoCierreService, timeouts } from './services/autoCierreService.js';
+import os from 'os';
+
+dotenv.config();
+
+const app = express();
+const server = createServer(app);
+
+// ============================================================
+// SOCKET.IO CONFIGURACIÓN
+// ============================================================
+const io = new Server(server, {
+  cors: {
+    origin: [
+      'http://localhost:3000',
+      'http://localhost:3001',
+      'http://172.16.30.212:3000',
+      'http://172.16.30.212:3001'
+    ],
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    credentials: true
+  },
+  transports: ['websocket', 'polling']
+});
+
+app.set('trust proxy', 1);
+
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://172.16.30.212:3000',
+    'http://172.16.30.212:3001'
+  ],
+  credentials: true
+}));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ============================================================
+// DETECTAR IP LOCAL
+// ============================================================
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const net of interfaces[name]) {
+      if (net.family === 'IPv4' && !net.internal) {
+        return net.address;
+      }
+    }
+  }
+  return 'localhost';
+}
+
+const LOCAL_IP = getLocalIP();
+console.log(`📡 IP detectada: ${LOCAL_IP}`);
+
+// ============================================================
+// SOCKET.IO - GESTIÓN DE USUARIOS
+// ============================================================
+const clients = new Map();
+
+io.on('connection', (socket) => {
+  console.log('🔌 Cliente Socket.IO conectado:', socket.id);
+  
+  socket.on('join', (userId) => {
+    if (userId) {
+      socket.userId = userId;
+      clients.set(userId.toString(), socket);
+      socket.join(`user:${userId}`);
+      
+      console.log('========================================');
+      console.log(`👤 [Socket] USUARIO UNIDO AL SOCKET`);
+      console.log(`   👤 UserId: ${userId}`);
+      console.log(`   📡 Socket ID: ${socket.id}`);
+      console.log(`   👥 Total clients conectados: ${clients.size}`);
+      console.log(`   📋 Usuarios: ${Array.from(clients.keys()).join(', ')}`);
+      console.log('========================================');
+      
+      socket.emit('connected', { 
+        userId, 
+        message: 'Conectado al servidor',
+        socketId: socket.id,
+        clientsCount: clients.size
+      });
+    } else {
+      console.warn('⚠️ [Socket] join sin userId:', socket.id);
+    }
+  });
+  
+  // ============================================================
+  // TODOS LOS EVENTOS DE TIEMPO REAL
+  // ============================================================
+  
+  socket.on('nueva-tarea-disponible', (data) => {
+    console.log(`📢 [Socket] Nueva tarea disponible:`, data.tarea?.titulo);
+    io.emit('nueva-tarea-disponible', data);
+  });
+  
+  socket.on('tarea-asignada', (data) => {
+    console.log(`📢 [Socket] Tarea asignada:`, data.tarea?.titulo);
+    io.emit('tarea-asignada', data);
+  });
+  
+  socket.on('tarea-tomada', (data) => {
+    console.log(`📢 [Socket] Tarea tomada por:`, data.empleado?.nombre);
+    io.emit('tarea-tomada', data);
+  });
+  
+  // 🔥 NUEVO: Evento específico para actualizar el Kanban del supervisor
+  socket.on('kanban-actualizar', (data) => {
+    console.log(`📋 [Socket] Kanban actualizar:`, data.mensaje);
+    io.emit('kanban-actualizar', data);
+  });
+  
+  socket.on('estado-actualizado', (data) => {
+    console.log(`📢 [Socket] Estado actualizado: ${data.porcentaje}%`);
+    io.emit('estado-actualizado', data);
+  });
+  
+  socket.on('tarea-lista-para-revision', (data) => {
+    console.log(`📢 [Socket] Tarea lista para revisión:`, data.titulo);
+    io.emit('tarea-lista-para-revision', data);
+  });
+  
+  socket.on('tarea-lista-para-calificar', (data) => {
+    console.log(`📢 [Socket] Tarea lista para calificar:`, data.titulo);
+    io.emit('tarea-lista-para-calificar', data);
+  });
+  
+  socket.on('tarea-calificada', (data) => {
+    console.log(`📢 [Socket] Tarea calificada: ${data.puntaje}★`);
+    io.emit('tarea-calificada', data);
+  });
+  
+  socket.on('tarea-auto-finalizada', (data) => {
+    console.log(`📢 [Socket] Tarea auto-finalizada:`, data.titulo);
+    io.emit('tarea-auto-finalizada', data);
+  });
+  
+  socket.on('estado-general-actualizado', (data) => {
+    console.log(`📢 [Socket] Estado general actualizado:`, data.titulo);
+    io.emit('estado-general-actualizado', data);
+  });
+  
+  socket.on('tarea-iniciada-tiempo-real', (data) => {
+    console.log(`📢 [Socket] Tarea iniciada:`, data.tarea?.titulo);
+    io.emit('tarea-iniciada-tiempo-real', data);
+  });
+  
+  socket.on('tarea-pausada-tiempo-real', (data) => {
+    console.log(`📢 [Socket] Tarea pausada:`, data.tareaId);
+    io.emit('tarea-pausada-tiempo-real', data);
+  });
+  
+  socket.on('tarea-reanudada-tiempo-real', (data) => {
+    console.log(`📢 [Socket] Tarea reanudada:`, data.tareaId);
+    io.emit('tarea-reanudada-tiempo-real', data);
+  });
+  
+  socket.on('tarea-completada-automaticamente', (data) => {
+    console.log(`📢 [Socket] Tarea completada automáticamente:`, data.titulo);
+    io.emit('tarea-completada-automaticamente', data);
+  });
+  
+  socket.on('tarea-finalizada-sin-cliente', (data) => {
+    console.log(`📢 [Socket] Tarea finalizada sin cliente:`, data.titulo);
+    io.emit('tarea-finalizada-sin-cliente', data);
+  });
+  
+  socket.on('tarea-por-expirar', (data) => {
+    console.log(`📢 [Socket] Tarea por expirar:`, data.titulo);
+    io.emit('tarea-por-expirar', data);
+  });
+  
+  socket.on('tarea-aprobada-por-supervisor', (data) => {
+    console.log(`📢 [Socket] Tarea aprobada por supervisor:`, data.titulo);
+    io.emit('tarea-aprobada-por-supervisor', data);
+  });
+  
+  socket.on('tarea-aprobada-enviada-cliente', (data) => {
+    console.log(`📢 [Socket] Tarea aprobada y enviada al cliente:`, data.titulo);
+    io.emit('tarea-aprobada-enviada-cliente', data);
+  });
+  
+  socket.on('tarea-enviada-a-cliente', (data) => {
+    console.log(`📢 [Socket] Tarea enviada a cliente:`, data.titulo);
+    io.emit('tarea-enviada-a-cliente', data);
+  });
+  
+  socket.on('nueva-tarea-asignada', (data) => {
+    console.log(`📢 [Socket] Nueva tarea asignada:`, data.tarea?.titulo);
+    io.emit('nueva-tarea-asignada', data);
+  });
+  
+  socket.on('rol-actualizado', (data) => {
+    console.log(`📢 [Socket] Rol actualizado: ${data.nuevoRol}`);
+    io.emit('rol-actualizado', data);
+  });
+  
+  socket.on('tarea-finalizada-sin-calificacion', (data) => {
+    console.log(`📢 [Socket] Tarea finalizada sin calificación:`, data.titulo);
+    io.emit('tarea-finalizada-sin-calificacion', data);
+  });
+  
+  socket.on('tarea-por-revisar', (data) => {
+    console.log(`📢 [Socket] Tarea por revisar:`, data.titulo);
+    io.emit('tarea-por-revisar', data);
+  });
+  
+  socket.on('tarea-reasignada', (data) => {
+    console.log(`📢 [Socket] Tarea reasignada:`, data.titulo);
+    io.emit('tarea-reasignada', data);
+  });
+  
+  // 🔥 Alerta de progreso crítico
+  socket.on('alerta-progreso-critico', (data) => {
+    console.log(`📢 [Socket] ⚠️ ALERTA CRÍTICA:`, data.titulo);
+    io.emit('alerta-progreso-critico', data);
+  });
+  
+  // 🔥 Tarea finalizada por ti
+  socket.on('tarea-finalizada-por-ti', (data) => {
+    console.log(`📢 [Socket] Tarea finalizada por ti:`, data.titulo);
+    io.emit('tarea-finalizada-por-ti', data);
+  });
+  
+  // ============================================================
+  // DESCONEXIÓN
+  // ============================================================
+  socket.on('disconnect', () => {
+    if (socket.userId) {
+      clients.delete(socket.userId.toString());
+      console.log(`👤 Usuario ${socket.userId} desconectado`);
+      console.log(`   👥 Usuarios conectados: ${clients.size}`);
+    } else {
+      console.log('❌ Cliente desconectado sin userId:', socket.id);
+    }
+  });
+});
+
+app.set('io', io);
+app.set('clients', clients);
+
+// ============================================================
+// RUTAS
+// ============================================================
+app.use('/api/auth', authRoutes);
+app.use('/api/tarjetas', tarjetaRoutes);
+app.use('/api/empleados', empleadoRoutes);
+app.use('/api/estadisticas', estadisticasRoutes);
+app.use('/api/solicitudes', solicitudRoutes);
+app.use('/api/configuracion', configuracionRoutes);
+
+// Health check con estadísticas
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(), 
+    ip: LOCAL_IP,
+    clients: clients.size,
+    timeouts: timeouts.size
+  });
+});
+
+// ============================================================
+// MONGODB CONNECTION
+// ============================================================
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch(err => console.error('❌ MongoDB connection error:', err));
+
+// ============================================================
+// INICIAR SERVIDOR
+// ============================================================
+const PORT = process.env.PORT || 5000;
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log('========================================');
+  console.log('🚀 Servidor backend iniciado');
+  console.log(`📍 Local:    http://localhost:${PORT}`);
+  console.log(`📍 Red:      http://${LOCAL_IP}:${PORT}`);
+  console.log(`📍 Health:   http://${LOCAL_IP}:${PORT}/api/health`);
+  console.log(`🔌 Socket:   ws://${LOCAL_IP}:${PORT}/socket.io`);
+  console.log('========================================');
+  
+  iniciarAutoCierreService(io, clients);
+});
+
+export default app; 
+================================= 
+middleware\auth.js 
+================================= 
+ 
+// middleware/auth.js
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
+
+export const protect = async (req, res, next) => {
+  let token;
+  
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    try {
+      token = req.headers.authorization.split(' ')[1];
+      
+      if (!token || token === 'null' || token === 'undefined') {
+        return res.status(401).json({ message: 'No autorizado, token inválido' });
+      }
+      
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      req.user = await User.findById(decoded.id).select('-password');
+      
+      if (!req.user) {
+        return res.status(401).json({ message: 'Usuario no encontrado' });
+      }
+      
+      next();
+    } catch (error) {
+      console.error('Error en auth:', error.message);
+      if (error.name === 'JsonWebTokenError') {
+        return res.status(401).json({ message: 'Token inválido, por favor inicia sesión nuevamente' });
+      }
+      if (error.name === 'TokenExpiredError') {
+        return res.status(401).json({ message: 'Token expirado, por favor inicia sesión nuevamente' });
+      }
+      return res.status(401).json({ message: 'No autorizado' });
+    }
+  }
+  
+  if (!token) {
+    return res.status(401).json({ message: 'No autorizado, token requerido' });
+  }
+};
+
+export const supervisorOnly = (req, res, next) => {
+  if (req.user && req.user.rol === 'supervisor') {
+    next();
+  } else {
+    return res.status(403).json({ message: 'Acceso solo para supervisores' });
+  }
+};
+
+export const tecnicoOrSupervisor = (req, res, next) => {
+  if (req.user && (req.user.rol === 'tecnico' || req.user.rol === 'supervisor')) {
+    next();
+  } else {
+    return res.status(403).json({ message: 'Acceso solo para técnicos y supervisores' });
+  }
+}; 
+================================= 
+models\Tarjeta.js 
+================================= 
+ 
+// models/Tarjeta.js
+import mongoose from 'mongoose';
+
+const registroHorasSchema = new mongoose.Schema({
+  fecha: {
+    type: Date,
+    default: Date.now
+  },
+  horasTrabajadas: {
+    type: Number,
+    required: true
+  },
+  minutosTrabajados: {
+    type: Number,
+    default: 0
+  },
+  porcentajeAvance: {
+    type: Number,
+    required: true
+  },
+  comentario: String,
+  inicioTrabajo: Date,
+  finTrabajo: Date,
+  cruzoMedianoche: {
+    type: Boolean,
+    default: false
+  },
+  esHoraExtra: {
+    type: Boolean,
+    default: false
+  }
+});
+
+const toleranciaSchema = new mongoose.Schema({
+  fecha: {
+    type: Date,
+    default: Date.now
+  },
+  motivo: String,
+  horasExtras: Number,
+  minutosExtras: Number,
+  aprobadaPor: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  estado: {
+    type: String,
+    enum: ['pendiente', 'aprobada', 'rechazada'],
+    default: 'pendiente'
+  }
+});
+
+// ============================================================
+// LOG DE TIEMPOS (HISTORIAL COMPLETO)
+// ============================================================
+const logTiempoSchema = new mongoose.Schema({
+  timestamp: {
+    type: Date,
+    default: Date.now
+  },
+  tipo: {
+    type: String,
+    enum: [
+      'sugerido_supervisor',
+      'estimado_tecnico',
+      'recalculado_progreso',
+      'tarea_iniciada',
+      'tarea_pausada',
+      'tarea_reanudada',
+      'tarea_finalizada',
+      'tarea_auto_finalizada',
+      'tarea_devuelta',
+      'tarea_reasignada',
+      'tiempo_estimado_tecnico_reasignacion'
+    ],
+    required: true
+  },
+  tiempoMinutos: {
+    type: Number,
+    default: 0
+  },
+  tiempoAnterior: {
+    type: Number,
+    default: 0
+  },
+  tiempoReal: {
+    type: Number,
+    default: 0
+  },
+  diferencia: {
+    type: Number,
+    default: 0
+  },
+  progreso: {
+    type: Number,
+    default: 0
+  },
+  tiempoTrabajado: {
+    type: Number,
+    default: 0
+  },
+  por: {
+    type: String,
+    default: 'Sistema'
+  },
+  rol: {
+    type: String,
+    enum: ['supervisor', 'tecnico', 'usuario', 'Sistema'],
+    default: 'Sistema'
+  },
+  motivo: {
+    type: String,
+    default: ''
+  },
+  eficiencia: {
+    type: String,
+    enum: ['mayor_a_esperado', 'esperado', 'menor_a_esperado', 'critico'],
+    default: 'esperado'
+  },
+  tiempoRestante: {
+    type: Number,
+    default: 0
+  },
+  tecnicoAnterior: {
+    type: String,
+    default: ''
+  },
+  tecnicoNuevo: {
+    type: String,
+    default: ''
+  },
+  alerta: {
+    type: Boolean,
+    default: false
+  }
+});
+
+const tarjetasSchema = new mongoose.Schema({
+  titulo: {
+    type: String,
+    required: true
+  },
+  descripcion: String,
+  tipo: {
+    type: String,
+    enum: ['solicitud_cliente', 'tarea_extra', 'asignacion_supervisor'],
+    required: true
+  },
+  
+  asignadaPor: {
+    type: String,
+    enum: ['auto', 'supervisor', 'empleado'],
+    default: 'auto'
+  },
+  asignadoA: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  asignadoPor: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  
+  estado: {
+    type: String,
+    enum: ['pendiente', 'en_progreso', 'revision_supervisor', 'revision_cliente', 'finalizada'],
+    default: 'pendiente'
+  },
+  
+  estadoProgreso: {
+    type: String,
+    enum: ['activa', 'pausada', 'pendiente', 'completada'],
+    default: 'pendiente'
+  },
+  
+  porcentajeCompletado: {
+    type: Number,
+    default: 0,
+    min: 0,
+    max: 100
+  },
+  
+  tiempoAcumulado: {
+    type: Number,
+    default: 0
+  },
+  
+  // ============================================================
+  // 🔥 NUEVO: CONTROL DE TIEMPO PAUSADO
+  // ============================================================
+  tiempoPausadoTotal: {
+    type: Number,
+    default: 0  // minutos totales que la tarea ha estado pausada
+  },
+  fechaUltimaPausa: {
+    type: Date,
+    default: null  // momento en que se pausó por última vez
+  },
+  
+  registroHoras: [registroHorasSchema],
+  tolerancias: [toleranciaSchema],
+  
+  horasEstimadas: {
+    type: Number,
+    default: 0
+  },
+  minutosEstimados: {
+    type: Number,
+    default: 0
+  },
+  horasTotalesReales: {
+    type: Number,
+    default: 0
+  },
+  minutosTotalesReales: {
+    type: Number,
+    default: 0
+  },
+  
+  tiempoSugeridoSupervisor: {
+    type: Number,
+    default: 0
+  },
+  tiempoEstimadoEmpleado: {
+    type: Number,
+    default: 0
+  },
+  
+  logTiempos: [logTiempoSchema],
+  
+  fechaInicioReal: Date,
+  fechaEstimadaFin: Date,
+  fechaUltimaReanudacion: Date,
+  
+  fechaLimite: Date,
+  fechaInicio: Date,
+  fechaCompletadaEmpleado: Date,
+  fechaRevisionSupervisor: Date,
+  fechaRevisionCliente: Date,
+  fechaFinalizada: Date,
+  
+  fechaExpiracionRevisionSupervisor: Date,
+  fechaExpiracionCalificacion: Date,
+  
+  revisionSupervisor: {
+    type: String,
+    enum: ['pendiente', 'aprobada'],
+    default: 'pendiente'
+  },
+  estadoCalificacion: {
+    type: String,
+    enum: ['pendiente', 'calificada', 'expirada', 'no_aplica'],
+    default: 'no_aplica'
+  },
+  
+  clienteInfo: {
+    logueado: {
+      type: Boolean,
+      default: false
+    },
+    nombre: String,
+    email: String,
+    telefono: String,
+    userId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    }
+  },
+  
+  calificacion: {
+    puntaje: Number,
+    comentario: String,
+    fecha: Date,
+    clienteId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    }
+  },
+  
+  prioridad: {
+    type: String,
+    enum: ['baja', 'media', 'alta', 'urgente'],
+    default: 'media'
+  },
+  
+  activo: {
+    type: Boolean,
+    default: true
+  }
+}, {
+  timestamps: true
+});
+
+export default mongoose.model('Tarjeta', tarjetasSchema); 
+================================= 
+models\User.js 
+================================= 
+ 
+// models/User.js
+import mongoose from 'mongoose';
+
+const userSchema = new mongoose.Schema({
+  nombre: {
+    type: String,
+    required: true
+  },
+  email: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  password: {
+    type: String,
+    default: 'zimbra_user'
+  },
+  zimbraUid: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true
+  },
+  zimbraToken: {
+    type: String,
+    default: null
+  },
+  zimbraTokenExpiry: {
+    type: Date,
+    default: null
+  },
+  rol: {
+    type: String,
+    enum: ['supervisor', 'tecnico', 'usuario'],
+    required: true,
+    default: 'usuario'
+  },
+  telefono: String,
+  avatar: String,
+  nivel: {
+    type: Number,
+    default: 1
+  },
+  horasTrabajadasHoy: {
+    type: Number,
+    default: 0
+  },
+  tareasActivas: [{
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Tarjeta'
+  }],
+  ultimoRegistroHoras: Date,
+  configuracionTolerancia: {
+    autoAprobarHasta: {
+      type: Number,
+      default: 2
+    },
+    requiereAprobacion: {
+      type: Boolean,
+      default: true
+    }
+  },
+  configuracionAutoCierre: {
+    revisarColumna: {
+      type: String,
+      enum: ['revision_cliente', 'revision_supervisor', 'ambas'],
+      default: 'revision_cliente'
+    },
+    diasMaximosCliente: {
+      type: Number,
+      default: 5,
+      min: 1,
+      max: 30
+    },
+    diasMaximosSupervisor: {
+      type: Number,
+      default: 3,
+      min: 1,
+      max: 15
+    },
+    accionAuto: {
+      type: String,
+      enum: ['finalizar', 'notificar_supervisor', 'escalar', 'reabrir'],
+      default: 'finalizar'
+    },
+    notificarAntesDias: {
+      type: Number,
+      default: 1,
+      min: 0,
+      max: 5
+    },
+    habilitado: {
+      type: Boolean,
+      default: true
+    },
+    excepcionesEmpleados: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    }]
+  },
+  
+  // ============================================================
+  // 🔥 NUEVO: Configuración de notificaciones (sonidos y visuales)
+  // ============================================================
+  configuracionNotificaciones: {
+    // Notificación 1: Recordatorio de tareas pendientes
+    recordatorioPendientes: {
+      habilitado: {
+        type: Boolean,
+        default: true
+      },
+      intervaloMinutos: {
+        type: Number,
+        default: 2,       // cada cuántos minutos sonar
+        min: 1,
+        max: 30
+      },
+      sonidoHabilitado: {
+        type: Boolean,
+        default: true
+      },
+      soloCuandoLibre: {
+        type: Boolean,
+        default: true    // solo suena si el técnico no tiene tarea activa
+      }
+    },
+    
+    // Notificación 2: Nueva tarea entra a pendiente
+    nuevaTareaPendiente: {
+      habilitado: {
+        type: Boolean,
+        default: true
+      },
+      sonidoHabilitado: {
+        type: Boolean,
+        default: true
+      }
+    },
+    
+    // Notificación 3: Supervisor asigna tarea específica
+    tareaAsignada: {
+      habilitado: {
+        type: Boolean,
+        default: true
+      },
+      sonidoHabilitado: {
+        type: Boolean,
+        default: true
+      }
+    },
+    
+    // Configuración global de sonido
+    volumen: {
+      type: Number,
+      default: 0.5,
+      min: 0,
+      max: 1
+    },
+    silenciarHasta: {
+      type: Date,
+      default: null
+    }
+  },
+  
+  // 🔥 NUEVO: Solicitudes rápidas predefinidas
+  solicitudesPredefinidas: [{
+    titulo: {
+      type: String,
+      required: true
+    },
+    descripcion: {
+      type: String,
+      default: ''
+    },
+    prioridad: {
+      type: String,
+      enum: ['baja', 'media', 'alta', 'urgente'],
+      default: 'media'
+    },
+    activo: {
+      type: Boolean,
+      default: true
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
+  activo: {
+    type: Boolean,
+    default: true
+  }
+}, {
+  timestamps: true
+});
+
+userSchema.methods.comparePassword = async function(candidatePassword) {
+  return false;
+};
+
+export default mongoose.model('User', userSchema); 
+================================= 
+routes\auth.js 
+================================= 
+ 
+// routes/auth.js - Login con Zimbra (VERSIÓN SIMPLIFICADA)
+import express from 'express';
+import jwt from 'jsonwebtoken';
+import axios from 'axios';
+import https from 'https';
+import User from '../models/User.js';
+
+const router = express.Router();
+const ZIMBRA_SERVER = 'https://correo.senado.gob.bo/service/soap';
+
+const SUPERVISOR_INICIAL_EMAIL = 'grover.plaza@senado.gob.bo';
+
+function extraerInfoUsuario(xmlData) {
+    let uid = null;
+    let nombre = null;
+    let email = null;
+    let userId = null;
+
+    console.log('📝 Extrayendo información del XML...');
+
+    const uidMatch = xmlData.match(/<attr name="uid">([^<]+)<\/attr>/);
+    if (uidMatch) {
+        uid = uidMatch[1];
+        console.log(`   ✅ uid: ${uid}`);
+    } else {
+        const uidDirect = xmlData.match(/<uid>([^<]+)<\/uid>/);
+        if (uidDirect) {
+            uid = uidDirect[1];
+            console.log(`   ✅ uid (directo): ${uid}`);
+        }
+    }
+
+    const displayMatch = xmlData.match(/<attr name="displayName">([^<]+)<\/attr>/);
+    if (displayMatch) {
+        nombre = displayMatch[1];
+        console.log(`   ✅ displayName: ${nombre}`);
+    } else {
+        const cnMatch = xmlData.match(/<attr name="cn">([^<]+)<\/attr>/);
+        if (cnMatch) {
+            nombre = cnMatch[1];
+            console.log(`   ✅ cn: ${nombre}`);
+        }
+    }
+
+    const emailMatch = xmlData.match(/<name>([^<]+)<\/name>/);
+    if (emailMatch) {
+        email = emailMatch[1];
+        console.log(`   ✅ email: ${email}`);
+        if (!uid) {
+            uid = email.split('@')[0];
+        }
+        if (!nombre) {
+            nombre = email;
+        }
+    }
+
+    const idMatch = xmlData.match(/<id>([^<]+)<\/id>/);
+    if (idMatch) {
+        userId = idMatch[1];
+        console.log(`   ✅ userId: ${userId}`);
+    }
+
+    console.log(`📊 Resultado: uid=${uid}, nombre=${nombre}, email=${email}`);
+    return { uid, nombre, email, userId };
+}
+
+async function getOrCreateUser(userInfo, zimbraToken) {
+    console.log(`🔍 Buscando usuario: ${userInfo.email}`);
+    
+    let user = await User.findOne({ email: userInfo.email });
+
+    if (!user && userInfo.uid) {
+        user = await User.findOne({ zimbraUid: userInfo.uid });
+    }
+
+    if (!user) {
+        const esSupervisorInicial = userInfo.email === SUPERVISOR_INICIAL_EMAIL;
+        const rolAsignado = esSupervisorInicial ? 'supervisor' : 'usuario';
+        
+        console.log(`👤 Creando nuevo usuario... (rol: ${rolAsignado})`);
+        user = new User({
+            nombre: userInfo.nombre || userInfo.email || 'Usuario Zimbra',
+            email: userInfo.email,
+            zimbraUid: userInfo.uid,
+            zimbraToken: zimbraToken,
+            rol: rolAsignado,
+            telefono: ''
+        });
+        await user.save();
+        console.log(`✅ Usuario creado: ${user.email} (rol: ${user.rol})`);
+    } else {
+        console.log(`✅ Usuario existente: ${user.email} (rol: ${user.rol})`);
+        user.nombre = userInfo.nombre || user.nombre;
+        user.zimbraUid = userInfo.uid || user.zimbraUid;
+        user.zimbraToken = zimbraToken;
+        await user.save();
+        console.log(`   ✅ Datos actualizados (rol mantenido: ${user.rol})`);
+    }
+
+    return user;
+}
+
+function generateToken(userId) {
+    return jwt.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: '30d' });
+}
+
+router.post('/login', async (req, res) => {
+    const { usuario, password } = req.body;
+
+    console.log('========================================');
+    console.log('🔐 [LOGIN] Intentando login Zimbra');
+    console.log(`📧 Usuario: ${usuario}`);
+    console.log('========================================');
+
+    if (!usuario || !password) {
+        console.log('❌ Faltan credenciales');
+        return res.status(400).json({
+            success: false,
+            error: 'Faltan credenciales',
+            mensaje: 'Por favor ingresa tu usuario y contraseña'
+        });
+    }
+
+    try {
+        const authRequest = `<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+    <soap:Body>
+        <AuthRequest xmlns="urn:zimbraAccount">
+            <account by="name">${usuario}</account>
+            <password>${password}</password>
+        </AuthRequest>
+    </soap:Body>
+</soap:Envelope>`;
+
+        console.log(`🌐 Enviando a: ${ZIMBRA_SERVER}`);
+        
+        let authResponse;
+        try {
+            authResponse = await axios.post(ZIMBRA_SERVER, authRequest, {
+                headers: { 'Content-Type': 'application/xml' },
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                timeout: 15000
+            });
+        } catch (axiosError) {
+            console.log('❌ Error al llamar a Zimbra:');
+            
+            if (axiosError.response) {
+                console.log(`   Status: ${axiosError.response.status}`);
+                const responseData = axiosError.response.data || '';
+                
+                // 🔥 DETECTAR ERROR DE AUTENTICACIÓN (usuario o contraseña incorrectos)
+                const isAuthError = responseData.includes('authentication failed') || 
+                                   responseData.includes('AUTH_FAILED') ||
+                                   responseData.includes('soap:Fault');
+                
+                if (isAuthError) {
+                    console.log('✅ Error de autenticación: usuario o contraseña incorrectos');
+                    
+                    // 🔥 MENSAJE GENÉRICO Y CLARO
+                    return res.status(401).json({
+                        success: false,
+                        error: 'Credenciales incorrectas',
+                        mensaje: 'Usuario o contraseña incorrectos. Por favor verifica tus datos.',
+                        detalle: 'Asegúrate de usar tu correo y contraseña de Zimbra.'
+                    });
+                }
+            }
+            
+            // Error de conexión
+            if (axiosError.code === 'ENOTFOUND' || axiosError.code === 'ECONNREFUSED' || axiosError.code === 'ETIMEDOUT') {
+                console.log('⚠️ Error de conexión con Zimbra');
+                return res.status(503).json({
+                    success: false,
+                    error: 'Servicio no disponible',
+                    mensaje: 'No pudimos conectar con el servidor de autenticación.',
+                    detalle: 'Verifica tu conexión de red o intenta más tarde.'
+                });
+            }
+            
+            throw axiosError;
+        }
+
+        console.log(`📨 Respuesta recibida (status: ${authResponse.status})`);
+
+        // Verificar si hay error SOAP
+        const responseData = authResponse.data || '';
+        const hasSoapFault = responseData.includes('<soap:Fault>') || 
+                            responseData.includes('<SOAP-ENV:Fault>') ||
+                            responseData.includes('authentication failed');
+        
+        if (hasSoapFault) {
+            console.log('❌ Error de autenticación detectado en respuesta SOAP');
+            
+            // 🔥 MENSAJE GENÉRICO Y CLARO
+            return res.status(401).json({
+                success: false,
+                error: 'Credenciales incorrectas',
+                mensaje: 'Usuario o contraseña incorrectos. Por favor verifica tus datos.',
+                detalle: 'Asegúrate de usar tu correo y contraseña de Zimbra.'
+            });
+        }
+
+        // Verificar que se recibió un token
+        const tokenMatch = responseData.match(/<authToken>(.*?)<\/authToken>/);
+        if (!tokenMatch) {
+            console.log('❌ No se encontró token en la respuesta');
+            return res.status(500).json({
+                success: false,
+                error: 'Error en el servidor',
+                mensaje: 'No se pudo completar la autenticación. Intenta nuevamente.'
+            });
+        }
+        
+        const zimbraToken = tokenMatch[1];
+        console.log(`✅ Token obtenido (${zimbraToken.length} caracteres)`);
+
+        console.log('📤 Obteniendo información del usuario...');
+        const infoRequest = `<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+    <soap:Header>
+        <context xmlns="urn:zimbra">
+            <authToken>${zimbraToken}</authToken>
+        </context>
+    </soap:Header>
+    <soap:Body>
+        <GetInfoRequest xmlns="urn:zimbraAccount"/>
+    </soap:Body>
+</soap:Envelope>`;
+
+        let userInfo = { uid: null, nombre: null, email: null, userId: null };
+
+        try {
+            const infoResponse = await axios.post(ZIMBRA_SERVER, infoRequest, {
+                headers: { 'Content-Type': 'application/xml' },
+                httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+                timeout: 15000
+            });
+            userInfo = extraerInfoUsuario(infoResponse.data);
+        } catch (error) {
+            console.log('⚠️ Error obteniendo información:', error.message);
+            userInfo.uid = usuario.split('@')[0] || usuario;
+            userInfo.nombre = usuario;
+            userInfo.email = usuario;
+        }
+
+        const user = await getOrCreateUser(userInfo, zimbraToken);
+
+        const jwtToken = generateToken(user._id);
+        console.log(`✅ JWT generado para: ${user.email} (rol: ${user.rol})`);
+
+        console.log('✅ Login exitoso!');
+        console.log('========================================\n');
+
+        res.json({
+            success: true,
+            _id: user._id,
+            nombre: user.nombre,
+            email: user.email,
+            rol: user.rol,
+            telefono: user.telefono || '',
+            zimbraUid: user.zimbraUid,
+            token: jwtToken,
+            zimbraToken: zimbraToken
+        });
+
+    } catch (error) {
+        console.error('========================================');
+        console.error('❌ ERROR EN LOGIN:');
+        console.error(`   Mensaje: ${error.message}`);
+        console.error(`   Código: ${error.code}`);
+        
+        if (error.response) {
+            console.error(`   Status: ${error.response.status}`);
+            const responseData = error.response.data || '';
+            
+            // Verificar si es error de autenticación
+            const isAuthError = responseData.includes('authentication failed') || 
+                               responseData.includes('AUTH_FAILED') ||
+                               responseData.includes('soap:Fault');
+            
+            if (isAuthError) {
+                console.log('✅ Error de autenticación detectado en catch');
+                
+                // 🔥 MENSAJE GENÉRICO Y CLARO
+                return res.status(401).json({
+                    success: false,
+                    error: 'Credenciales incorrectas',
+                    mensaje: 'Usuario o contraseña incorrectos. Por favor verifica tus datos.',
+                    detalle: 'Asegúrate de usar tu correo y contraseña de Zimbra.'
+                });
+            }
+        }
+        
+        if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+            console.error('   ⚠️ Error de conexión con Zimbra');
+            return res.status(503).json({
+                success: false,
+                error: 'Servicio no disponible',
+                mensaje: 'No pudimos conectar con el servidor de autenticación.',
+                detalle: 'Verifica tu conexión de red o intenta más tarde.'
+            });
+        }
+
+        console.error('========================================\n');
+        res.status(500).json({
+            success: false,
+            error: 'Error del servidor',
+            mensaje: 'Ocurrió un error inesperado. Intenta nuevamente.',
+            detalle: 'Si el problema persiste, contacta al administrador.'
+        });
+    }
+});
+
+router.post('/verificar', async (req, res) => {
+    const { token } = req.body;
+
+    if (!token) {
+        return res.status(400).json({
+            success: false,
+            error: 'No se proporcionó token'
+        });
+    }
+
+    try {
+        const soapRequest = `<?xml version="1.0"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+    <soap:Body>
+        <AuthRequest xmlns="urn:zimbraAccount">
+            <authToken>${token}</authToken>
+        </AuthRequest>
+    </soap:Body>
+</soap:Envelope>`;
+
+        const response = await axios.post(ZIMBRA_SERVER, soapRequest, {
+            headers: { 'Content-Type': 'application/xml' },
+            httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+            timeout: 10000
+        });
+
+        if (response.data.includes('<soap:Fault>')) {
+            return res.status(401).json({
+                success: false,
+                error: 'Token inválido o expirado'
+            });
+        }
+
+        res.json({
+            success: true,
+            mensaje: 'Token válido'
+        });
+
+    } catch (error) {
+        res.status(401).json({
+            success: false,
+            error: 'Token inválido o expirado'
+        });
+    }
+});
+
+export default router; 
+================================= 
+routes\configuracion.js 
+================================= 
+ 
+// routes/configuracion.js
+import express from 'express';
+import User from '../models/User.js';
+import { protect, supervisorOnly } from '../middleware/auth.js';
+
+const router = express.Router();
+
+// ============================================================
+// AUTO-CIERRE (existente)
+// ============================================================
+
+router.get('/auto-cierre', protect, supervisorOnly, async (req, res) => {
+  try {
+    const supervisor = await User.findOne({ rol: 'supervisor', activo: true })
+      .select('configuracionAutoCierre nombre email');
+    
+    if (!supervisor) {
+      return res.status(404).json({ message: 'No se encontró configuración del supervisor' });
+    }
+    
+    const tecnicos = await User.find({ rol: 'tecnico', activo: true })
+      .select('_id nombre email');
+    
+    res.json({
+      configuracion: supervisor.configuracionAutoCierre || {
+        revisarColumna: 'revision_cliente',
+        diasMaximosCliente: 5,
+        diasMaximosSupervisor: 3,
+        accionAuto: 'finalizar',
+        notificarAntesDias: 1,
+        habilitado: true,
+        excepcionesEmpleados: []
+      },
+      empleados: tecnicos,
+      supervisorNombre: supervisor.nombre
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/auto-cierre', protect, supervisorOnly, async (req, res) => {
+  try {
+    const {
+      revisarColumna,
+      diasMaximosCliente,
+      diasMaximosSupervisor,
+      accionAuto,
+      notificarAntesDias,
+      habilitado,
+      excepcionesEmpleados
+    } = req.body;
+    
+    const supervisor = await User.findOne({ rol: 'supervisor', activo: true });
+    
+    if (!supervisor) {
+      return res.status(404).json({ message: 'Supervisor no encontrado' });
+    }
+    
+    supervisor.configuracionAutoCierre = {
+      revisarColumna: revisarColumna || 'revision_cliente',
+      diasMaximosCliente: Math.min(30, Math.max(1, diasMaximosCliente || 5)),
+      diasMaximosSupervisor: Math.min(15, Math.max(1, diasMaximosSupervisor || 3)),
+      accionAuto: accionAuto || 'finalizar',
+      notificarAntesDias: Math.min(5, Math.max(0, notificarAntesDias || 1)),
+      habilitado: habilitado !== undefined ? habilitado : true,
+      excepcionesEmpleados: excepcionesEmpleados || []
+    };
+    
+    await supervisor.save();
+    
+    res.json({
+      success: true,
+      message: 'Configuración actualizada exitosamente',
+      configuracion: supervisor.configuracionAutoCierre
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.get('/auto-cierre/estadisticas', protect, supervisorOnly, async (req, res) => {
+  try {
+    const Tarjeta = (await import('../models/Tarjeta.js')).default;
+    
+    const stats = await Tarjeta.aggregate([
+      {
+        $match: {
+          'calificacion.autoFinalizada': true,
+          createdAt: { $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            mes: { $month: '$createdAt' },
+            año: { $year: '$createdAt' }
+          },
+          count: { $sum: 1 },
+          porTipo: {
+            $push: {
+              tipo: '$calificacion.tipo',
+              accion: '$calificacion.accion'
+            }
+          }
+        }
+      }
+    ]);
+    
+    const supervisor = await User.findOne({ rol: 'supervisor' });
+    
+    res.json({
+      totalAutoFinalizadas: stats.reduce((sum, s) => sum + s.count, 0),
+      porMes: stats,
+      configuracionActual: supervisor?.configuracionAutoCierre || {}
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// 🔥 NUEVO: NOTIFICACIONES (sonidos y visuales)
+// ============================================================
+
+// Obtener la configuración de notificaciones
+router.get('/notificaciones', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('configuracionNotificaciones rol');
+    
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    
+    // Devolver la config del propio usuario
+    // Si es supervisor, devuelve la suya (que es la plantilla global)
+    // Si es técnico, devuelve la suya (que puede haber sido personalizada)
+    const configDefault = {
+      recordatorioPendientes: {
+        habilitado: true,
+        intervaloMinutos: 2,
+        sonidoHabilitado: true,
+        soloCuandoLibre: true
+      },
+      nuevaTareaPendiente: {
+        habilitado: true,
+        sonidoHabilitado: true
+      },
+      tareaAsignada: {
+        habilitado: true,
+        sonidoHabilitado: true
+      },
+      volumen: 0.5,
+      silenciarHasta: null
+    };
+    
+    res.json({
+      success: true,
+      configuracion: user.configuracionNotificaciones || configDefault,
+      rol: user.rol
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Actualizar configuración (supervisor puede actualizar la global para todos)
+router.put('/notificaciones', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    
+    const {
+      recordatorioPendientes,
+      nuevaTareaPendiente,
+      tareaAsignada,
+      volumen,
+      silenciarHasta
+    } = req.body;
+    
+    // Validar y construir la nueva configuración
+    const nuevaConfig = {
+      recordatorioPendientes: {
+        habilitado: recordatorioPendientes?.habilitado ?? true,
+        intervaloMinutos: Math.min(30, Math.max(1, parseInt(recordatorioPendientes?.intervaloMinutos) || 2)),
+        sonidoHabilitado: recordatorioPendientes?.sonidoHabilitado ?? true,
+        soloCuandoLibre: recordatorioPendientes?.soloCuandoLibre ?? true
+      },
+      nuevaTareaPendiente: {
+        habilitado: nuevaTareaPendiente?.habilitado ?? true,
+        sonidoHabilitado: nuevaTareaPendiente?.sonidoHabilitado ?? true
+      },
+      tareaAsignada: {
+        habilitado: tareaAsignada?.habilitado ?? true,
+        sonidoHabilitado: tareaAsignada?.sonidoHabilitado ?? true
+      },
+      volumen: Math.min(1, Math.max(0, parseFloat(volumen) || 0.5)),
+      silenciarHasta: silenciarHasta || null
+    };
+    
+    user.configuracionNotificaciones = nuevaConfig;
+    await user.save();
+    
+    console.log(`🔔 [Configuración] Notificaciones actualizadas para ${user.email} (rol: ${user.rol})`);
+    
+    // 🔥 Si es supervisor, actualizar TODOS los técnicos con la misma config base
+    // (excepto volumen y silenciarHasta, que son personales)
+    if (user.rol === 'supervisor') {
+      const tecnicos = await User.find({ rol: 'tecnico', activo: true });
+      
+      for (const tecnico of tecnicos) {
+        // Preservar volumen y silenciarHasta del técnico
+        const volumenTecnico = tecnico.configuracionNotificaciones?.volumen ?? 0.5;
+        const silenciarTecnico = tecnico.configuracionNotificaciones?.silenciarHasta ?? null;
+        
+        tecnico.configuracionNotificaciones = {
+          ...nuevaConfig,
+          volumen: volumenTecnico,
+          silenciarHasta: silenciarTecnico
+        };
+        
+        await tecnico.save();
+      }
+      
+      console.log(`   📢 Propagado a ${tecnicos.length} técnicos`);
+      
+      // Notificar a todos los técnicos por socket que su config cambió
+      const io = req.app.get('io');
+      const clients = req.app.get('clients');
+      
+      tecnicos.forEach(tec => {
+        const socket = clients.get(tec._id.toString());
+        if (socket) {
+          socket.emit('notificaciones-actualizadas', {
+            configuracion: tec.configuracionNotificaciones
+          });
+        }
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Configuración de notificaciones actualizada',
+      configuracion: user.configuracionNotificaciones
+    });
+  } catch (error) {
+    console.error('❌ Error actualizando notificaciones:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Silenciar notificaciones por X minutos (para técnicos y supervisores)
+router.post('/notificaciones/silenciar', protect, async (req, res) => {
+  try {
+    const { minutos } = req.body;
+    const minutosValidos = Math.min(480, Math.max(1, parseInt(minutos) || 30));
+    
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    
+    if (!user.configuracionNotificaciones) {
+      user.configuracionNotificaciones = {};
+    }
+    
+    user.configuracionNotificaciones.silenciarHasta = new Date(Date.now() + minutosValidos * 60 * 1000);
+    await user.save();
+    
+    console.log(`🔕 [Notificaciones] ${user.email} silenció por ${minutosValidos} min`);
+    
+    res.json({
+      success: true,
+      message: `Notificaciones silenciadas por ${minutosValidos} minutos`,
+      silenciarHasta: user.configuracionNotificaciones.silenciarHasta
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Reactivar notificaciones (quitar silencio)
+router.post('/notificaciones/reactivar', protect, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ message: 'Usuario no encontrado' });
+    }
+    
+    if (!user.configuracionNotificaciones) {
+      user.configuracionNotificaciones = {};
+    }
+    
+    user.configuracionNotificaciones.silenciarHasta = null;
+    await user.save();
+    
+    console.log(`🔔 [Notificaciones] ${user.email} reactivó notificaciones`);
+    
+    res.json({
+      success: true,
+      message: 'Notificaciones reactivadas'
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// SOLICITUDES PREDEFINIDAS (existente)
+// ============================================================
+
+router.get('/solicitudes-predefinidas', protect, supervisorOnly, async (req, res) => {
+  try {
+    const supervisor = await User.findOne({ rol: 'supervisor', activo: true });
+    
+    if (!supervisor) {
+      return res.status(404).json({ message: 'Supervisor no encontrado' });
+    }
+    
+    res.json({
+      success: true,
+      solicitudes: supervisor.solicitudesPredefinidas || []
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.post('/solicitudes-predefinidas', protect, supervisorOnly, async (req, res) => {
+  try {
+    const { titulo, descripcion, prioridad } = req.body;
+    
+    if (!titulo || titulo.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        message: 'El título es obligatorio'
+      });
+    }
+    
+    const supervisor = await User.findOne({ rol: 'supervisor', activo: true });
+    
+    if (!supervisor) {
+      return res.status(404).json({ message: 'Supervisor no encontrado' });
+    }
+    
+    const existe = supervisor.solicitudesPredefinidas.some(
+      s => s.titulo.toLowerCase() === titulo.trim().toLowerCase() && s.activo !== false
+    );
+    
+    if (existe) {
+      return res.status(400).json({
+        success: false,
+        message: 'Ya existe una solicitud con ese título'
+      });
+    }
+    
+    supervisor.solicitudesPredefinidas.push({
+      titulo: titulo.trim(),
+      descripcion: descripcion || '',
+      prioridad: prioridad || 'media',
+      activo: true
+    });
+    
+    await supervisor.save();
+    
+    const nueva = supervisor.solicitudesPredefinidas[supervisor.solicitudesPredefinidas.length - 1];
+    
+    res.status(201).json({
+      success: true,
+      message: 'Solicitud predefinida creada exitosamente',
+      solicitud: nueva
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/solicitudes-predefinidas/:id', protect, supervisorOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { titulo, descripcion, prioridad, activo } = req.body;
+    
+    const supervisor = await User.findOne({ rol: 'supervisor', activo: true });
+    
+    if (!supervisor) {
+      return res.status(404).json({ message: 'Supervisor no encontrado' });
+    }
+    
+    const index = supervisor.solicitudesPredefinidas.findIndex(
+      s => s._id.toString() === id
+    );
+    
+    if (index === -1) {
+      return res.status(404).json({
+        success: false,
+        message: 'Solicitud no encontrada'
+      });
+    }
+    
+    const solicitud = supervisor.solicitudesPredefinidas[index];
+    
+    if (titulo && titulo.trim() !== '') {
+      solicitud.titulo = titulo.trim();
+    }
+    if (descripcion !== undefined) {
+      solicitud.descripcion = descripcion;
+    }
+    if (prioridad) {
+      solicitud.prioridad = prioridad;
+    }
+    if (activo !== undefined) {
+      solicitud.activo = activo;
+    }
+    
+    await supervisor.save();
+    
+    res.json({
+      success: true,
+      message: 'Solicitud actualizada exitosamente',
+      solicitud
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.delete('/solicitudes-predefinidas/:id', protect, supervisorOnly, async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const supervisor = await User.findOne({ rol: 'supervisor', activo: true });
+    
+    if (!supervisor) {
+      return res.status(404).json({ message: 'Supervisor no encontrado' });
+    }
+    
+    const index = supervisor.solicitudesPredefinidas.findIndex(
+      s => s._id.toString() === id
+    );
+    
+    if (index === -1) {
+      return res.status(404).json({
+        success: false,
+        message: 'Solicitud no encontrada'
+      });
+    }
+    
+    supervisor.solicitudesPredefinidas[index].activo = false;
+    
+    await supervisor.save();
+    
+    res.json({
+      success: true,
+      message: 'Solicitud eliminada exitosamente'
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+export default router; 
+================================= 
+routes\empleados.js 
+================================= 
+ 
+// routes/empleados.js
+import express from 'express';
+import User from '../models/User.js';
+import { protect, supervisorOnly } from '../middleware/auth.js';
+
+const router = express.Router();
+
+router.get('/', protect, supervisorOnly, async (req, res) => {
+  try {
+    const tecnicos = await User.find({ 
+      rol: { $in: ['tecnico', 'usuario'] }, 
+      activo: true 
+    })
+      .select('-password')
+      .sort('nombre');
+    
+    const tecnicosFormateados = tecnicos.map(emp => ({
+      _id: emp._id,
+      nombre: emp.nombre,
+      email: emp.email,
+      telefono: emp.telefono || '',
+      rol: emp.rol,
+      horasTrabajadasHoy: emp.horasTrabajadasHoy || 0,
+      tareasActivas: emp.tareasActivas || []
+    }));
+    
+    res.json(tecnicosFormateados);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.get('/todos', protect, supervisorOnly, async (req, res) => {
+  try {
+    const usuarios = await User.find({ activo: true })
+      .select('-password')
+      .sort('nombre');
+    
+    res.json(usuarios);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/:userId/rol', protect, supervisorOnly, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { rol } = req.body;
+
+    if (!['supervisor', 'tecnico', 'usuario'].includes(rol)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Rol inválido. Debe ser: supervisor, tecnico o usuario'
+      });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'Usuario no encontrado'
+      });
+    }
+
+    if (userId === req.user._id.toString()) {
+      return res.status(400).json({
+        success: false,
+        error: 'No puedes cambiar tu propio rol'
+      });
+    }
+
+    if (user.rol === 'supervisor' && rol !== 'supervisor') {
+      const countSupervisores = await User.countDocuments({ 
+        rol: 'supervisor', 
+        _id: { $ne: userId },
+        activo: true 
+      });
+      
+      if (countSupervisores === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No se puede quitar el rol de supervisor. Debe haber al menos un supervisor en el sistema.'
+        });
+      }
+    }
+
+    user.rol = rol;
+    await user.save();
+
+    console.log(`✅ Rol actualizado: ${user.email} -> ${user.rol}`);
+
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    const socket = clients.get(userId);
+    if (socket) {
+      socket.emit('rol-actualizado', {
+        userId: user._id,
+        nuevoRol: user.rol,
+        mensaje: `Tu rol ha sido actualizado a: ${user.rol}`
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Rol actualizado a ${rol}`,
+      user: {
+        _id: user._id,
+        nombre: user.nombre,
+        email: user.email,
+        rol: user.rol
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error actualizando rol:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Error actualizando rol'
+    });
+  }
+});
+
+router.get('/supervisores', protect, async (req, res) => {
+  try {
+    const supervisores = await User.find({ 
+      rol: 'supervisor', 
+      activo: true 
+    }).select('_id nombre email');
+    
+    res.json(supervisores);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+export default router; 
+================================= 
+routes\estadisticas.js 
+================================= 
+ 
+// routes/estadisticas.js
+import express from 'express';
+import Tarjeta from '../models/Tarjeta.js';
+import User from '../models/User.js';
+import { protect, supervisorOnly } from '../middleware/auth.js';
+
+const router = express.Router();
+
+router.get('/', protect, supervisorOnly, async (req, res) => {
+  try {
+    const fechaInicio = new Date();
+    fechaInicio.setDate(fechaInicio.getDate() - 30);
+    
+    const tareasPorEstado = await Tarjeta.aggregate([
+      { $match: { createdAt: { $gte: fechaInicio } } },
+      { $group: { _id: '$estado', count: { $sum: 1 } } }
+    ]);
+    
+    const horasPorDia = await Tarjeta.aggregate([
+      { $unwind: '$registroHoras' },
+      { $match: { 'registroHoras.fecha': { $gte: fechaInicio } } },
+      { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$registroHoras.fecha' } },
+          totalHoras: { $sum: '$registroHoras.horasTrabajadas' }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+    
+    const productividadTecnicos = await Tarjeta.aggregate([
+      { $match: { asignadoA: { $ne: null }, estado: 'completada' } },
+      { $group: {
+          _id: '$asignadoA',
+          tareasCompletadas: { $sum: 1 },
+          horasTotales: { $sum: '$horasTotalesReales' },
+          calificacionPromedio: { $avg: '$calificacion.puntaje' }
+        }
+      },
+      { $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'tecnico'
+        }
+      }
+    ]);
+    
+    const tareasNocturnas = await Tarjeta.aggregate([
+      { $unwind: '$registroHoras' },
+      { $match: { 'registroHoras.cruzoMedianoche': true } },
+      { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$registroHoras.fecha' } },
+          count: { $sum: 1 },
+          horasExtras: { $sum: '$registroHoras.horasTrabajadas' }
+        }
+      }
+    ]);
+    
+    const tareasPorTipo = await Tarjeta.aggregate([
+      { $match: { createdAt: { $gte: fechaInicio } } },
+      { $group: { _id: '$tipo', count: { $sum: 1 } } }
+    ]);
+    
+    const burndown = await Tarjeta.aggregate([
+      { $match: { createdAt: { $gte: fechaInicio } } },
+      { $group: {
+          _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+          nuevas: { $sum: 1 },
+          completadas: {
+            $sum: { $cond: [{ $eq: ['$estado', 'completada'] }, 1, 0] }
+          }
+        }
+      },
+      { $sort: { _id: 1 } }
+    ]);
+    
+    const toleranciasPendientes = await Tarjeta.aggregate([
+      { $unwind: '$tolerancias' },
+      { $match: { 'tolerancias.estado': 'pendiente' } },
+      { $count: 'total' }
+    ]);
+    
+    res.json({
+      tareasPorEstado,
+      horasPorDia,
+      productividadEmpleados: productividadTecnicos,
+      tareasNocturnas,
+      tareasPorTipo,
+      burndown,
+      toleranciasPendientes: toleranciasPendientes[0]?.total || 0
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+export default router; 
+================================= 
+routes\solicitudes.js 
+================================= 
+ 
+// routes/solicitudes.js
+import express from 'express';
+import Tarjeta from '../models/Tarjeta.js';
+
+const router = express.Router();
+
+router.post('/publicas', async (req, res) => {
+  try {
+    const { titulo, descripcion, clienteInfo } = req.body;
+    
+    const solicitud = await Tarjeta.create({
+      titulo,
+      descripcion,
+      tipo: 'solicitud_cliente',
+      horasEstimadas: 0,
+      minutosEstimados: 0,
+      prioridad: clienteInfo?.logueado ? 'alta' : 'media',
+      clienteInfo: {
+        logueado: clienteInfo?.logueado || false,
+        nombre: clienteInfo.nombre,
+        email: clienteInfo.email || '',
+        telefono: clienteInfo.telefono,
+        userId: null
+      },
+      estado: 'pendiente'
+    });
+    
+    res.json({ success: true, message: 'Solicitud enviada exitosamente', id: solicitud._id });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+export default router; 
+================================= 
+routes\tarjetas.js 
+================================= 
+ 
+// routes/tarjetas.js
+import express from 'express';
+import Tarjeta from '../models/Tarjeta.js';
+import User from '../models/User.js';
+import { protect, supervisorOnly } from '../middleware/auth.js';
+import { 
+  programarAutoFinalizacion, 
+  cancelarAutoFinalizacion,
+  registrarLogTiempo,
+  recalcularTiempoPorProgreso
+} from '../services/autoCierreService.js';
+
+const router = express.Router();
+
+// ============================================================
+// FUNCIONES AUXILIARES
+// ============================================================
+
+const calcularEficiencia = (tiempoEstimado, tiempoReal) => {
+  if (!tiempoEstimado || tiempoEstimado <= 0) return 'esperado';
+  const diferencia = ((tiempoReal - tiempoEstimado) / tiempoEstimado) * 100;
+  if (diferencia <= -20) return 'mayor_a_esperado';
+  if (diferencia <= 20) return 'esperado';
+  if (diferencia <= 50) return 'menor_a_esperado';
+  return 'critico';
+};
+
+const calcularProgresoPorTiempo = (tarjeta) => {
+  if (!tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado <= 0) {
+    return {
+      porcentaje: tarjeta.porcentajeCompletado,
+      tiempoTranscurrido: 0,
+      tiempoRestante: 0,
+      tiempoExcedido: 0,
+      debeFinalizar: false
+    };
+  }
+  
+  let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+  
+  if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+    const ahora = new Date();
+    const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+    const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+    tiempoTotalTrabajado += minutosDesdeReanudacion;
+  }
+  
+  const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado;
+  
+  let porcentaje = Math.min(100, Math.floor((tiempoTotalTrabajado / tiempoEstimado) * 100));
+  porcentaje = Math.max(porcentaje, tarjeta.porcentajeCompletado);
+  porcentaje = Math.min(100, porcentaje);
+  
+  const tiempoRestante = Math.max(0, tiempoEstimado - tiempoTotalTrabajado);
+  const tiempoExcedido = Math.max(0, tiempoTotalTrabajado - tiempoEstimado);
+  
+  return {
+    porcentaje,
+    tiempoTranscurrido: tiempoTotalTrabajado,
+    tiempoRestante,
+    tiempoExcedido,
+    debeFinalizar: tiempoExcedido > 5
+  };
+};
+
+const calcularTiempoRestante = (tarjeta) => {
+  const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado || 0;
+  const tiempoTrabajado = tarjeta.tiempoAcumulado || 0;
+  return Math.max(0, tiempoEstimado - tiempoTrabajado);
+};
+
+// ============================================================
+// GET - CONSULTAS
+// ============================================================
+
+router.get('/', protect, async (req, res) => {
+  try {
+    let query = {};
+    
+    if (req.user.rol === 'tecnico') {
+      query = { asignadoA: req.user._id };
+    } else if (req.user.rol === 'supervisor') {
+      query = {};
+    } else if (req.user.rol === 'usuario') {
+      query = {
+        $or: [
+          { 'clienteInfo.userId': req.user._id },
+          { asignadoA: req.user._id }
+        ]
+      };
+    }
+    
+    const tarjetas = await Tarjeta.find(query)
+      .populate('asignadoA', 'nombre email')
+      .populate('asignadoPor', 'nombre')
+      .sort('-createdAt');
+    
+    res.json(tarjetas);
+  } catch (error) {
+    console.error('❌ Error en GET /tarjetas:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.get('/disponibles', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const tareasDisponibles = await Tarjeta.find({
+      estado: 'pendiente',
+      asignadoA: null,
+      tipo: 'solicitud_cliente'
+    })
+      .sort({ prioridad: -1, createdAt: 1 })
+      .limit(20);
+    
+    res.json(tareasDisponibles);
+  } catch (error) {
+    console.error('❌ Error en GET /disponibles:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.get('/estado-empleados', protect, async (req, res) => {
+  try {
+    if (req.user.rol === 'usuario') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const tecnicos = await User.find({ 
+      rol: 'tecnico', 
+      activo: true 
+    }).select('nombre email');
+    
+    let supervisorConTarea = null;
+    if (req.user.rol === 'supervisor') {
+      const tareaSupervisorActiva = await Tarjeta.findOne({
+        asignadoA: req.user._id,
+        estado: 'en_progreso',
+        estadoProgreso: 'activa'
+      }).populate('asignadoA', 'nombre email');
+      
+      if (tareaSupervisorActiva) {
+        const { porcentaje, tiempoTranscurrido, tiempoRestante } = calcularProgresoPorTiempo(tareaSupervisorActiva);
+        
+        supervisorConTarea = {
+          empleadoId: req.user._id,
+          empleadoNombre: req.user.nombre,
+          empleadoEmail: req.user.email,
+          rol: 'supervisor',
+          tarea: {
+            id: tareaSupervisorActiva._id,
+            titulo: tareaSupervisorActiva.titulo,
+            descripcion: tareaSupervisorActiva.descripcion,
+            porcentajeCompletado: porcentaje,
+            tiempoEstimado: tareaSupervisorActiva.tiempoEstimadoEmpleado || 0,
+            tiempoAcumulado: tareaSupervisorActiva.tiempoAcumulado || 0,
+            fechaUltimaReanudacion: tareaSupervisorActiva.fechaUltimaReanudacion,
+            tiempoTranscurrido: tiempoTranscurrido,
+            tiempoRestante: tiempoRestante,
+            fechaInicio: tareaSupervisorActiva.fechaInicioReal,
+            fechaEstimadaFin: tareaSupervisorActiva.fechaEstimadaFin,
+            estadoProgreso: tareaSupervisorActiva.estadoProgreso,
+            estado: tareaSupervisorActiva.estado
+          }
+        };
+      }
+    }
+    
+    const estados = [];
+    
+    for (const tecnico of tecnicos) {
+      const tareaActiva = await Tarjeta.findOne({
+        asignadoA: tecnico._id,
+        estado: 'en_progreso',
+        estadoProgreso: 'activa'
+      }).populate('asignadoA', 'nombre email');
+      
+      if (tareaActiva) {
+        const { porcentaje, tiempoTranscurrido, tiempoRestante } = calcularProgresoPorTiempo(tareaActiva);
+        
+        estados.push({
+          empleadoId: tecnico._id,
+          empleadoNombre: tecnico.nombre,
+          empleadoEmail: tecnico.email,
+          rol: 'tecnico',
+          tarea: {
+            id: tareaActiva._id,
+            titulo: tareaActiva.titulo,
+            descripcion: tareaActiva.descripcion,
+            porcentajeCompletado: porcentaje,
+            tiempoEstimado: tareaActiva.tiempoEstimadoEmpleado || 0,
+            tiempoAcumulado: tareaActiva.tiempoAcumulado || 0,
+            fechaUltimaReanudacion: tareaActiva.fechaUltimaReanudacion,
+            tiempoTranscurrido: tiempoTranscurrido,
+            tiempoRestante: tiempoRestante,
+            fechaInicio: tareaActiva.fechaInicioReal,
+            fechaEstimadaFin: tareaActiva.fechaEstimadaFin,
+            estadoProgreso: tareaActiva.estadoProgreso,
+            estado: tareaActiva.estado
+          }
+        });
+      } else {
+        estados.push({
+          empleadoId: tecnico._id,
+          empleadoNombre: tecnico.nombre,
+          empleadoEmail: tecnico.email,
+          rol: 'tecnico',
+          tarea: null
+        });
+      }
+    }
+    
+    if (supervisorConTarea) {
+      estados.push(supervisorConTarea);
+    }
+    
+    res.json(estados);
+  } catch (error) {
+    console.error('❌ Error en estado-empleados:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.get('/:id/progreso-automatico', protect, async (req, res) => {
+  try {
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.estado !== 'en_progreso') {
+      return res.json({
+        porcentajeCalculado: tarjeta.porcentajeCompletado,
+        tiempoTranscurrido: 0,
+        tiempoRestante: 0,
+        tiempoExcedido: 0,
+        estaActiva: false,
+        estado: tarjeta.estado
+      });
+    }
+    
+    if (tarjeta.estadoProgreso !== 'activa') {
+      return res.json({
+        porcentajeCalculado: tarjeta.porcentajeCompletado,
+        tiempoTranscurrido: 0,
+        tiempoRestante: tarjeta.tiempoEstimadoEmpleado || 0,
+        tiempoExcedido: 0,
+        estaActiva: false,
+        estado: tarjeta.estado
+      });
+    }
+    
+    if (!tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado <= 0) {
+      return res.json({
+        porcentajeCalculado: tarjeta.porcentajeCompletado,
+        tiempoTranscurrido: 0,
+        tiempoRestante: 0,
+        tiempoExcedido: 0,
+        estaActiva: false,
+        estado: tarjeta.estado
+      });
+    }
+    
+    let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+    
+    if (tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+      tiempoTotalTrabajado += minutosDesdeReanudacion;
+    }
+    
+    const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado;
+    let porcentajeCalculado = Math.min(100, Math.floor((tiempoTotalTrabajado / tiempoEstimado) * 100));
+    porcentajeCalculado = Math.max(porcentajeCalculado, tarjeta.porcentajeCompletado);
+    porcentajeCalculado = Math.min(100, porcentajeCalculado);
+    
+    const tiempoRestante = Math.max(0, tiempoEstimado - tiempoTotalTrabajado);
+    const tiempoExcedido = Math.max(0, tiempoTotalTrabajado - tiempoEstimado);
+    
+    res.json({
+      porcentajeCalculado,
+      tiempoTranscurrido: tiempoTotalTrabajado,
+      tiempoRestante,
+      tiempoExcedido,
+      estaActiva: true,
+      tiempoEstimado,
+      fechaInicio: tarjeta.fechaInicioReal,
+      fechaEstimadaFin: tarjeta.fechaEstimadaFin
+    });
+  } catch (error) {
+    console.error('❌ Error en progreso-automatico:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.get('/:id/logs', protect, async (req, res) => {
+  try {
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    res.json({
+      success: true,
+      logs: tarjeta.logTiempos || [],
+      total: tarjeta.logTiempos?.length || 0
+    });
+  } catch (error) {
+    console.error('❌ Error en GET /logs:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.get('/:id', protect, async (req, res) => {
+  try {
+    const tarjeta = await Tarjeta.findById(req.params.id)
+      .populate('asignadoA', 'nombre email')
+      .populate('asignadoPor', 'nombre');
+    
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    res.json(tarjeta);
+  } catch (error) {
+    console.error('❌ Error en GET /:id:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// POST - CREAR SOLICITUD / TAREA EXTRA
+// ============================================================
+
+router.post('/', protect, async (req, res) => {
+  try {
+    const { titulo, descripcion, horasEstimadas, clienteInfo } = req.body;
+    
+    console.log('📝 [POST /] Creando solicitud...');
+    console.log(`   📌 Título: ${titulo}`);
+    console.log(`   👤 Usuario ID: ${req.user._id}`);
+    
+    const solicitud = await Tarjeta.create({
+      titulo,
+      descripcion,
+      tipo: 'solicitud_cliente',
+      horasEstimadas: horasEstimadas || 0,
+      prioridad: clienteInfo?.logueado ? 'alta' : 'media',
+      clienteInfo: {
+        logueado: clienteInfo?.logueado || false,
+        nombre: clienteInfo?.nombre || 'Anónimo',
+        email: clienteInfo?.email,
+        telefono: clienteInfo?.telefono,
+        userId: req.user._id
+      },
+      estado: 'pendiente',
+      logTiempos: []
+    });
+    
+    console.log(`✅ Solicitud creada con ID: ${solicitud._id}`);
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    const usuarios = await User.find({ 
+      rol: { $in: ['tecnico', 'supervisor'] }, 
+      activo: true 
+    }).select('_id nombre rol');
+    
+    usuarios.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        socket.emit('nueva-tarea-disponible', {
+          tarea: solicitud,
+          mensaje: `Nueva solicitud: ${solicitud.titulo}`
+        });
+        
+        // 🔥 NUEVO: Notificación sonora específica para nueva tarea pendiente
+        // Solo se emite a técnicos
+        if (usuario.rol === 'tecnico') {
+          socket.emit('notificacion-nueva-pendiente', {
+            tarea: {
+              _id: solicitud._id,
+              titulo: solicitud.titulo,
+              descripcion: solicitud.descripcion,
+              prioridad: solicitud.prioridad
+            },
+            mensaje: `📋 Nueva tarea pendiente: "${solicitud.titulo}"`
+          });
+        }
+      }
+    });
+    
+    res.status(201).json(solicitud);
+  } catch (error) {
+    console.error('❌ Error en POST /:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.post('/tarea-extra', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const { titulo, descripcion, horasEstimadas, minutosEstimados } = req.body;
+    
+    const tareaExtra = await Tarjeta.create({
+      titulo,
+      descripcion,
+      tipo: 'tarea_extra',
+      horasEstimadas: horasEstimadas || 0,
+      minutosEstimados: minutosEstimados || 0,
+      asignadoA: req.user._id,
+      asignadoPor: req.user._id,
+      asignadaPor: 'auto',
+      estado: 'en_progreso',
+      prioridad: 'media',
+      fechaInicio: new Date(),
+      estadoProgreso: 'pausada',
+      logTiempos: []
+    });
+    
+    await User.findByIdAndUpdate(req.user._id, {
+      $push: { tareasActivas: tareaExtra._id }
+    });
+    
+    // 🔥 NUEVO: Notificación sonora porque es una tarea auto-asignada
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    const socketPropio = clients.get(req.user._id.toString());
+    if (socketPropio) {
+      socketPropio.emit('notificacion-tarea-asignada', {
+        tarea: {
+          _id: tareaExtra._id,
+          titulo: tareaExtra.titulo,
+          descripcion: tareaExtra.descripcion,
+          prioridad: tareaExtra.prioridad
+        },
+        asignadaPor: 'Tú mismo',
+        mensaje: `📌 Creaste una tarea extra: "${tareaExtra.titulo}"`
+      });
+    }
+    
+    res.status(201).json(tareaExtra);
+  } catch (error) {
+    console.error('❌ Error en POST /tarea-extra:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// PUT - DEVOLVER / REASIGNAR
+// ============================================================
+
+router.put('/:id/devolver', protect, async (req, res) => {
+  try {
+    const { motivo } = req.body;
+    
+    const tarjeta = await Tarjeta.findById(req.params.id).populate('asignadoA', 'nombre email');
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA?._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No eres el técnico asignado a esta tarea' });
+    }
+    
+    if (tarjeta.estado !== 'en_progreso') {
+      return res.status(400).json({ message: 'La tarea no está en progreso' });
+    }
+    
+    if (tarjeta.tiempoEstimadoEmpleado > 0) {
+      return res.status(400).json({ 
+        message: 'No puedes devolver una tarea que ya tiene tiempo estimado. Si no puedes completarla, contacta a tu supervisor.' 
+      });
+    }
+    
+    const tecnicoNombre = tarjeta.asignadoA?.nombre || 'Desconocido';
+    
+    tarjeta.estado = 'pendiente';
+    tarjeta.asignadoA = null;
+    tarjeta.asignadoPor = null;
+    tarjeta.estadoProgreso = 'pendiente';
+    tarjeta.tiempoAcumulado = 0;
+    tarjeta.tiempoPausadoTotal = 0;
+    tarjeta.fechaUltimaPausa = null;
+    tarjeta.fechaInicioReal = null;
+    tarjeta.fechaUltimaReanudacion = null;
+    
+    await tarjeta.save();
+    
+    await User.findByIdAndUpdate(req.user._id, {
+      $pull: { tareasActivas: tarjeta._id }
+    });
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_devuelta',
+      por: req.user.nombre,
+      rol: 'tecnico',
+      motivo: motivo || 'Sin tiempo estimado establecido'
+    });
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    const usuarios = await User.find({ 
+      rol: { $in: ['tecnico', 'supervisor'] }, 
+      activo: true 
+    }).select('_id nombre rol');
+    
+    usuarios.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        socket.emit('nueva-tarea-disponible', {
+          tarea: tarjeta,
+          mensaje: `📋 Tarea "${tarjeta.titulo}" está disponible (devuelta por ${tecnicoNombre})`
+        });
+        
+        // 🔥 NUEVO: Notificación sonora porque vuelve a estar pendiente
+        if (usuario.rol === 'tecnico') {
+          socket.emit('notificacion-nueva-pendiente', {
+            tarea: {
+              _id: tarjeta._id,
+              titulo: tarjeta.titulo,
+              descripcion: tarjeta.descripcion,
+              prioridad: tarjeta.prioridad
+            },
+            mensaje: `📋 Tarea disponible: "${tarjeta.titulo}"`
+          });
+        }
+      }
+    });
+    
+    res.json({ 
+      success: true, 
+      message: 'Tarea devuelta exitosamente',
+      tarjeta 
+    });
+    
+  } catch (error) {
+    console.error('❌ Error en devolver:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/:id/reasignar', protect, supervisorOnly, async (req, res) => {
+  try {
+    const { nuevoEmpleadoId, motivo } = req.body;
+    
+    const tarjeta = await Tarjeta.findById(req.params.id)
+      .populate('asignadoA', 'nombre email');
+    
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.estado !== 'en_progreso' && tarjeta.estado !== 'pendiente') {
+      return res.status(400).json({ message: 'La tarea no está disponible para reasignar' });
+    }
+    
+    const tecnicoAnterior = tarjeta.asignadoA;
+    const tecnicoAnteriorNombre = tecnicoAnterior?.nombre || 'Sin asignar';
+    
+    if (tecnicoAnterior) {
+      await User.findByIdAndUpdate(tecnicoAnterior._id, {
+        $pull: { tareasActivas: tarjeta._id }
+      });
+      
+      if (tarjeta.estadoProgreso === 'activa') {
+        cancelarAutoFinalizacion(tarjeta._id);
+      }
+    }
+    
+    const nuevoTecnico = await User.findById(nuevoEmpleadoId);
+    if (!nuevoTecnico) {
+      return res.status(404).json({ message: 'Técnico no encontrado' });
+    }
+    
+    if (nuevoTecnico.rol !== 'tecnico') {
+      return res.status(400).json({ 
+        message: `El usuario "${nuevoTecnico.nombre}" no es un técnico` 
+      });
+    }
+    
+    tarjeta.asignadoA = nuevoEmpleadoId;
+    tarjeta.asignadoPor = req.user._id;
+    tarjeta.asignadaPor = 'supervisor';
+    tarjeta.estado = 'en_progreso';
+    tarjeta.estadoProgreso = 'pausada';
+    tarjeta.tiempoAcumulado = 0;
+    tarjeta.tiempoPausadoTotal = 0;
+    tarjeta.fechaUltimaPausa = null;
+    tarjeta.fechaUltimaReanudacion = null;
+    tarjeta.fechaInicioReal = null;
+    
+    await tarjeta.save();
+    
+    await User.findByIdAndUpdate(nuevoEmpleadoId, {
+      $push: { tareasActivas: tarjeta._id }
+    });
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_reasignada',
+      por: req.user.nombre,
+      rol: 'supervisor',
+      motivo: motivo || 'Reasignación por supervisor',
+      tecnicoAnterior: tecnicoAnteriorNombre,
+      tecnicoNuevo: nuevoTecnico.nombre
+    });
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    const socketNuevo = clients.get(nuevoEmpleadoId.toString());
+    if (socketNuevo) {
+      socketNuevo.emit('nueva-tarea-asignada', {
+        tarea: tarjeta,
+        mensaje: `📋 Tarea "${tarjeta.titulo}" te ha sido reasignada`
+      });
+      
+      // 🔥 NUEVO: Notificación sonora al nuevo técnico
+      socketNuevo.emit('notificacion-tarea-asignada', {
+        tarea: {
+          _id: tarjeta._id,
+          titulo: tarjeta.titulo,
+          descripcion: tarjeta.descripcion,
+          prioridad: tarjeta.prioridad
+        },
+        asignadaPor: req.user.nombre,
+        mensaje: `📌 ${req.user.nombre} te reasignó: "${tarjeta.titulo}"`
+      });
+    }
+    
+    if (tecnicoAnterior) {
+      const socketAnterior = clients.get(tecnicoAnterior._id.toString());
+      if (socketAnterior) {
+        socketAnterior.emit('tarea-reasignada', {
+          tareaId: tarjeta._id,
+          titulo: tarjeta.titulo,
+          mensaje: `📋 La tarea "${tarjeta.titulo}" ha sido reasignada a ${nuevoTecnico.nombre}`
+        });
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Tarea reasignada exitosamente',
+      tarjeta 
+    });
+    
+  } catch (error) {
+    console.error('❌ Error en reasignar:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// PUT - FINALIZAR TAREA (TÉCNICO)
+// ============================================================
+
+router.put('/:id/finalizar', protect, async (req, res) => {
+  try {
+    const { comentario } = req.body;
+    
+    const tarjeta = await Tarjeta.findById(req.params.id).populate('asignadoA', 'nombre email');
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA?._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No eres el técnico asignado a esta tarea' });
+    }
+    
+    if (tarjeta.estado !== 'en_progreso') {
+      return res.status(400).json({ message: 'La tarea no está en progreso' });
+    }
+    
+    let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+    if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+      tiempoTotalTrabajado += minutosDesdeReanudacion;
+    }
+    
+    const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado || 0;
+    const diferencia = tiempoTotalTrabajado - tiempoEstimado;
+    const eficiencia = calcularEficiencia(tiempoEstimado, tiempoTotalTrabajado);
+    
+    console.log(`✅ FINALIZANDO TAREA (directo): ${tarjeta.titulo}`);
+    console.log(`   Tiempo estimado: ${tiempoEstimado} min`);
+    console.log(`   Tiempo real: ${tiempoTotalTrabajado} min`);
+    console.log(`   Diferencia: ${diferencia > 0 ? '+' : ''}${diferencia} min`);
+    console.log(`   Eficiencia: ${eficiencia}`);
+    
+    tarjeta.estado = 'finalizada';
+    tarjeta.fechaCompletadaEmpleado = new Date();
+    tarjeta.fechaFinalizada = new Date();
+    tarjeta.estadoProgreso = 'completada';
+    tarjeta.porcentajeCompletado = 100;
+    tarjeta.tiempoAcumulado = tiempoTotalTrabajado;
+    tarjeta.estadoCalificacion = 'pendiente';
+    tarjeta.fechaUltimaPausa = null;
+    
+    const horasReales = Math.floor(tiempoTotalTrabajado / 60);
+    const minutosReales = tiempoTotalTrabajado % 60;
+    tarjeta.horasTotalesReales = horasReales;
+    tarjeta.minutosTotalesReales = minutosReales;
+    
+    await tarjeta.save();
+    
+    cancelarAutoFinalizacion(tarjeta._id);
+    
+    await User.findByIdAndUpdate(req.user._id, {
+      $pull: { tareasActivas: tarjeta._id }
+    });
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_finalizada',
+      tiempoMinutos: tiempoEstimado,
+      tiempoReal: tiempoTotalTrabajado,
+      diferencia: diferencia,
+      eficiencia: eficiencia,
+      por: req.user.nombre,
+      rol: 'tecnico',
+      motivo: comentario || 'Tarea completada manualmente'
+    });
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    const socketTecnico = clients.get(req.user._id.toString());
+    if (socketTecnico) {
+      socketTecnico.emit('tarea-finalizada-por-ti', {
+        tareaId: tarjeta._id,
+        titulo: tarjeta.titulo,
+        mensaje: `✅ Tarea "${tarjeta.titulo}" finalizada`
+      });
+    }
+    
+    if (tarjeta.clienteInfo?.userId) {
+      const socketCliente = clients.get(tarjeta.clienteInfo.userId.toString());
+      if (socketCliente) {
+        socketCliente.emit('tarea-finalizada-por-ti', {
+          tareaId: tarjeta._id,
+          titulo: tarjeta.titulo,
+          mensaje: `✅ Tu tarea "${tarjeta.titulo}" ha sido finalizada. Puedes calificarla cuando quieras.`
+        });
+      }
+    }
+    
+    io.emit('estado-general-actualizado', {
+      tareaId: tarjeta._id,
+      titulo: tarjeta.titulo,
+      estado: tarjeta.estado,
+      porcentaje: 100,
+      empleadoId: req.user._id,
+      mensaje: `Tarea "${tarjeta.titulo}" finalizada por ${req.user.nombre}`
+    });
+    
+    res.json({ 
+      success: true, 
+      message: 'Tarea finalizada exitosamente',
+      tarjeta,
+      eficiencia,
+      tiempoReal: tiempoTotalTrabajado
+    });
+    
+  } catch (error) {
+    console.error('❌ Error en finalizar:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// PUT - ASIGNACIÓN
+// ============================================================
+
+router.put('/:id/auto-asignar', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA) {
+      return res.status(400).json({ message: 'Tarea ya asignada' });
+    }
+    
+    tarjeta.asignadoA = req.user._id;
+    tarjeta.asignadoPor = req.user._id;
+    tarjeta.asignadaPor = 'auto';
+    tarjeta.estado = 'en_progreso';
+    tarjeta.fechaInicio = new Date();
+    tarjeta.fechaInicioReal = new Date();
+    tarjeta.estadoProgreso = 'pausada';
+    tarjeta.tiempoAcumulado = 0;
+    tarjeta.tiempoPausadoTotal = 0;
+    tarjeta.fechaUltimaPausa = null;
+    tarjeta.fechaUltimaReanudacion = null;
+    
+    await tarjeta.save();
+    await User.findByIdAndUpdate(req.user._id, {
+      $push: { tareasActivas: tarjeta._id }
+    });
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_iniciada',
+      por: req.user.nombre,
+      rol: req.user.rol,
+      motivo: 'Tarea auto-asignada'
+    });
+    
+    const tareaActualizada = await Tarjeta.findById(tarjeta._id)
+      .populate('asignadoA', 'nombre email')
+      .populate('asignadoPor', 'nombre');
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    const otrosUsuarios = await User.find({ 
+      rol: { $in: ['tecnico', 'supervisor'] }, 
+      _id: { $ne: req.user._id },
+      activo: true 
+    }).select('_id nombre rol');
+    
+    console.log('========================================');
+    console.log(`📤 [auto-asignar] Notificando a ${otrosUsuarios.length} usuarios sobre tarea tomada`);
+    console.log(`   📋 Tarea: ${tareaActualizada.titulo}`);
+    console.log(`   👤 Tomada por: ${req.user.nombre} (${req.user.rol})`);
+    console.log(`   📊 Total clients conectados: ${clients.size}`);
+    
+    otrosUsuarios.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        console.log(`   ✅ Notificando a ${usuario.nombre} (${usuario.rol})`);
+        socket.emit('tarea-tomada', {
+          tarea: tareaActualizada,
+          empleado: {
+            id: req.user._id,
+            nombre: req.user.nombre,
+            rol: req.user.rol
+          },
+          mensaje: `${req.user.nombre} (${req.user.rol}) tomó la tarea: ${tareaActualizada.titulo}`
+        });
+      } else {
+        console.warn(`   ⚠️ Socket NO encontrado para ${usuario.nombre} (${usuario.rol}) - ID: ${usuario._id}`);
+      }
+    });
+    console.log('========================================');
+    
+    const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id');
+    supervisores.forEach(sup => {
+      const socketSup = clients.get(sup._id.toString());
+      if (socketSup) {
+        socketSup.emit('kanban-actualizar', {
+          tareaId: tareaActualizada._id,
+          tarea: tareaActualizada,
+          accion: 'tarea-tomada',
+          mensaje: `📋 Nueva tarea asignada: ${tareaActualizada.titulo}`
+        });
+      }
+    });
+    
+    res.json(tareaActualizada);
+  } catch (error) {
+    console.error('❌ Error en auto-asignar:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/tomar-siguiente', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const tarea = await Tarjeta.findOne({
+      estado: 'pendiente',
+      asignadoA: null,
+      tipo: 'solicitud_cliente'
+    }).sort({ prioridad: -1, createdAt: 1 });
+    
+    if (!tarea) {
+      return res.status(404).json({ message: 'No hay tareas disponibles' });
+    }
+    
+    tarea.asignadoA = req.user._id;
+    tarea.asignadoPor = req.user._id;
+    tarea.asignadaPor = 'auto';
+    tarea.estado = 'en_progreso';
+    tarea.fechaInicio = new Date();
+    tarea.fechaInicioReal = new Date();
+    tarea.estadoProgreso = 'pausada';
+    tarea.tiempoAcumulado = 0;
+    tarea.tiempoPausadoTotal = 0;
+    tarea.fechaUltimaPausa = null;
+    tarea.fechaUltimaReanudacion = null;
+    
+    await tarea.save();
+    
+    await User.findByIdAndUpdate(req.user._id, {
+      $push: { tareasActivas: tarea._id }
+    });
+    
+    await registrarLogTiempo(tarea._id, {
+      tipo: 'tarea_iniciada',
+      por: req.user.nombre,
+      rol: req.user.rol,
+      motivo: 'Tarea tomada (siguiente disponible)'
+    });
+    
+    const tareaActualizada = await Tarjeta.findById(tarea._id)
+      .populate('asignadoA', 'nombre email')
+      .populate('asignadoPor', 'nombre');
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    const socketUsuario = clients.get(req.user._id.toString());
+    if (socketUsuario) {
+      socketUsuario.emit('tarea-asignada', {
+        tarea: tareaActualizada,
+        mensaje: `Has tomado la tarea: ${tareaActualizada.titulo}`
+      });
+    }
+    
+    const otrosUsuarios = await User.find({ 
+      rol: { $in: ['tecnico', 'supervisor'] }, 
+      _id: { $ne: req.user._id },
+      activo: true 
+    }).select('_id nombre rol');
+    
+    console.log('========================================');
+    console.log(`📤 [tomar-siguiente] Notificando a ${otrosUsuarios.length} usuarios`);
+    console.log(`   📋 Tarea: ${tareaActualizada.titulo}`);
+    console.log(`   👤 Tomada por: ${req.user.nombre} (${req.user.rol})`);
+    console.log(`   📊 Total clients conectados: ${clients.size}`);
+    
+    otrosUsuarios.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        console.log(`   ✅ Notificando a ${usuario.nombre} (${usuario.rol})`);
+        socket.emit('tarea-tomada', {
+          tarea: tareaActualizada,
+          empleado: {
+            id: req.user._id,
+            nombre: req.user.nombre,
+            rol: req.user.rol
+          },
+          mensaje: `${req.user.nombre} (${req.user.rol}) tomó la tarea: ${tareaActualizada.titulo}`
+        });
+      } else {
+        console.warn(`   ⚠️ Socket NO encontrado para ${usuario.nombre} (${usuario.rol})`);
+      }
+    });
+    console.log('========================================');
+    
+    const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id');
+    supervisores.forEach(sup => {
+      const socketSup = clients.get(sup._id.toString());
+      if (socketSup) {
+        socketSup.emit('kanban-actualizar', {
+          tareaId: tareaActualizada._id,
+          tarea: tareaActualizada,
+          accion: 'tarea-tomada',
+          mensaje: `📋 Nueva tarea asignada: ${tareaActualizada.titulo}`
+        });
+      }
+    });
+    
+    res.json({ 
+      success: true, 
+      tarea: tareaActualizada,
+      message: 'Tarea asignada exitosamente'
+    });
+  } catch (error) {
+    console.error('❌ Error en tomar-siguiente:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/:id/tomar', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA) {
+      return res.status(400).json({ message: 'Tarea ya asignada' });
+    }
+    
+    if (tarjeta.estado !== 'pendiente') {
+      return res.status(400).json({ message: 'La tarea no está disponible' });
+    }
+    
+    tarjeta.asignadoA = req.user._id;
+    tarjeta.asignadoPor = req.user._id;
+    tarjeta.asignadaPor = 'auto';
+    tarjeta.estado = 'en_progreso';
+    tarjeta.fechaInicio = new Date();
+    tarjeta.fechaInicioReal = new Date();
+    tarjeta.estadoProgreso = 'pausada';
+    tarjeta.tiempoAcumulado = 0;
+    tarjeta.tiempoPausadoTotal = 0;
+    tarjeta.fechaUltimaPausa = null;
+    tarjeta.fechaUltimaReanudacion = null;
+    
+    await tarjeta.save();
+    
+    await User.findByIdAndUpdate(req.user._id, {
+      $push: { tareasActivas: tarjeta._id }
+    });
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_iniciada',
+      por: req.user.nombre,
+      rol: req.user.rol,
+      motivo: 'Tarea tomada específicamente'
+    });
+    
+    const tareaActualizada = await Tarjeta.findById(tarjeta._id)
+      .populate('asignadoA', 'nombre email')
+      .populate('asignadoPor', 'nombre');
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    const socketUsuario = clients.get(req.user._id.toString());
+    if (socketUsuario) {
+      socketUsuario.emit('tarea-asignada', {
+        tarea: tareaActualizada,
+        mensaje: `Has tomado la tarea: ${tareaActualizada.titulo}`
+      });
+    }
+    
+    const otrosUsuarios = await User.find({ 
+      rol: { $in: ['tecnico', 'supervisor'] }, 
+      _id: { $ne: req.user._id },
+      activo: true 
+    }).select('_id');
+    
+    otrosUsuarios.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        socket.emit('tarea-tomada', {
+          tarea: tareaActualizada,
+          empleado: {
+            id: req.user._id,
+            nombre: req.user.nombre,
+            rol: req.user.rol
+          },
+          mensaje: `${req.user.nombre} (${req.user.rol}) tomó la tarea: ${tareaActualizada.titulo}`
+        });
+      }
+    });
+    
+    res.json({ 
+      success: true, 
+      tarea: tareaActualizada,
+      message: 'Tarea asignada exitosamente'
+    });
+  } catch (error) {
+    console.error('❌ Error en tomar específica:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/:id/asignar-supervisor', protect, supervisorOnly, async (req, res) => {
+  try {
+    const { empleadoId, tiempoSugeridoHoras, tiempoSugeridoMinutos } = req.body;
+    
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    const tecnico = await User.findById(empleadoId);
+    if (!tecnico) {
+      return res.status(404).json({ message: 'Técnico no encontrado' });
+    }
+    
+    if (tecnico.rol !== 'tecnico') {
+      return res.status(400).json({ 
+        success: false,
+        message: `El usuario "${tecnico.nombre}" no es un técnico.`
+      });
+    }
+    
+    tarjeta.asignadoA = empleadoId;
+    tarjeta.asignadoPor = req.user._id;
+    tarjeta.asignadaPor = 'supervisor';
+    tarjeta.estado = 'en_progreso';
+    tarjeta.estadoProgreso = 'pausada';
+    tarjeta.fechaInicio = new Date();
+    tarjeta.tiempoAcumulado = 0;
+    tarjeta.tiempoPausadoTotal = 0;
+    tarjeta.fechaUltimaPausa = null;
+    tarjeta.fechaUltimaReanudacion = null;
+    
+    let tiempoSugerido = 0;
+    if (tiempoSugeridoHoras || tiempoSugeridoMinutos) {
+      const horas = Math.min(999, Math.max(0, parseInt(tiempoSugeridoHoras) || 0));
+      const minutos = Math.min(59, Math.max(0, parseInt(tiempoSugeridoMinutos) || 0));
+      tiempoSugerido = (horas * 60) + minutos;
+      tarjeta.tiempoSugeridoSupervisor = tiempoSugerido;
+    }
+    
+    await tarjeta.save();
+    
+    await User.findByIdAndUpdate(empleadoId, {
+      $push: { tareasActivas: tarjeta._id }
+    });
+    
+    if (tiempoSugerido > 0) {
+      await registrarLogTiempo(tarjeta._id, {
+        tipo: 'sugerido_supervisor',
+        tiempoMinutos: tiempoSugerido,
+        por: req.user.nombre,
+        rol: 'supervisor',
+        motivo: `Tiempo sugerido por supervisor`
+      });
+    }
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_iniciada',
+      por: req.user.nombre,
+      rol: 'supervisor',
+      motivo: `Asignada a ${tecnico.nombre}`
+    });
+    
+    const tarjetaActualizada = await Tarjeta.findById(req.params.id)
+      .populate('asignadoA', 'nombre email')
+      .populate('asignadoPor', 'nombre');
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    const socket = clients.get(empleadoId);
+    if (socket) {
+      socket.emit('nueva-tarea-asignada', {
+        tarea: tarjetaActualizada,
+        mensaje: `Nueva tarea asignada: ${tarjetaActualizada.titulo}`
+      });
+      
+      // 🔥 NUEVO: Notificación sonora específica al técnico asignado
+      socket.emit('notificacion-tarea-asignada', {
+        tarea: {
+          _id: tarjetaActualizada._id,
+          titulo: tarjetaActualizada.titulo,
+          descripcion: tarjetaActualizada.descripcion,
+          prioridad: tarjetaActualizada.prioridad
+        },
+        asignadaPor: req.user.nombre,
+        mensaje: `📌 ${req.user.nombre} te asignó: "${tarjetaActualizada.titulo}"`
+      });
+      
+      console.log(`   🔔 Notificación sonora enviada a ${tecnico.nombre}`);
+    }
+    
+    // 🔥 Notificar a supervisores para actualizar Kanban
+    const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id');
+    supervisores.forEach(sup => {
+      const socketSup = clients.get(sup._id.toString());
+      if (socketSup) {
+        socketSup.emit('kanban-actualizar', {
+          tareaId: tarjetaActualizada._id,
+          tarea: tarjetaActualizada,
+          accion: 'asignada-supervisor',
+          mensaje: `📋 Tarea asignada a ${tecnico.nombre}: ${tarjetaActualizada.titulo}`
+        });
+      }
+    });
+    
+    res.json({ 
+      success: true, 
+      message: 'Tarea asignada exitosamente',
+      tarea: tarjetaActualizada 
+    });
+  } catch (error) {
+    console.error('❌ Error en asignar-supervisor:', error);
+    res.status(500).json({ 
+      success: false,
+      message: error.message 
+    });
+  }
+});
+
+// ============================================================
+// PUT - TIEMPO ESTIMADO
+// ============================================================
+
+router.put('/:id/tiempo-estimado', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const { tiempoEstimadoHoras, tiempoEstimadoMinutos } = req.body;
+    
+    const horas = parseInt(tiempoEstimadoHoras) || 0;
+    const minutos = parseInt(tiempoEstimadoMinutos) || 0;
+    
+    if (horas > 0 && minutos > 59) {
+      return res.status(400).json({ 
+        message: 'Cuando hay horas, los minutos no pueden ser mayores a 59' 
+      });
+    }
+    
+    const tiempoTotalMinutos = (horas * 60) + minutos;
+    
+    if (tiempoTotalMinutos <= 0) {
+      return res.status(400).json({ 
+        message: 'El tiempo estimado debe ser mayor a 0' 
+      });
+    }
+    
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA?.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    if (tarjeta.estadoProgreso === 'activa') {
+      return res.status(400).json({ 
+        message: 'No puedes modificar el tiempo mientras la tarea está activa. Pausa la tarea primero.' 
+      });
+    }
+    
+    const tiempoAnterior = tarjeta.tiempoEstimadoEmpleado || 0;
+    const diferencia = tiempoTotalMinutos - tiempoAnterior;
+    
+    tarjeta.tiempoEstimadoEmpleado = tiempoTotalMinutos;
+    
+    const tiempoRestante = Math.max(0, tiempoTotalMinutos - (tarjeta.tiempoAcumulado || 0));
+    tarjeta.fechaEstimadaFin = new Date(Date.now() + tiempoRestante * 60 * 1000);
+    
+    await tarjeta.save();
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'estimado_tecnico',
+      tiempoMinutos: tiempoTotalMinutos,
+      tiempoAnterior: tiempoAnterior,
+      diferencia: diferencia,
+      por: req.user.nombre,
+      rol: 'tecnico',
+      motivo: req.body.motivo || 'Estimación inicial del técnico',
+      tiempoRestante: tiempoTotalMinutos
+    });
+    
+    if (tarjeta.estado === 'en_progreso' && tarjeta.estadoProgreso === 'pausada') {
+      const io = req.app.get('io');
+      const clients = req.app.get('clients');
+      programarAutoFinalizacion(tarjeta._id, tiempoRestante, io, clients);
+    }
+    
+    res.json({ 
+      success: true, 
+      message: 'Tiempo estimado guardado correctamente',
+      tarjeta: {
+        _id: tarjeta._id,
+        tiempoEstimadoEmpleado: tarjeta.tiempoEstimadoEmpleado,
+        fechaEstimadaFin: tarjeta.fechaEstimadaFin
+      }
+    });
+  } catch (error) {
+    console.error('❌ Error en tiempo-estimado:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// PUT - PROGRESO
+// ============================================================
+
+router.put('/:id/progreso', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const { porcentajeAvance, comentario } = req.body;
+    
+    if (!comentario || comentario.trim().length < 5) {
+      return res.status(400).json({ 
+        success: false,
+        message: 'El comentario es obligatorio (mínimo 5 caracteres) para que el supervisor entienda el motivo del avance.' 
+      });
+    }
+    
+    const tarjeta = await Tarjeta.findById(req.params.id).populate('asignadoA', 'nombre email');
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA?._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    if (tarjeta.estado !== 'en_progreso') {
+      return res.status(400).json({ message: 'La tarea no está en progreso' });
+    }
+    
+    let tiempoTotalMinutos = tarjeta.tiempoAcumulado || 0;
+    
+    if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+      tiempoTotalMinutos += minutosDesdeReanudacion;
+    }
+    
+    const horasTrabajadas = Math.floor(tiempoTotalMinutos / 60);
+    const minutosTrabajados = tiempoTotalMinutos % 60;
+    
+    const registro = {
+      fecha: new Date(),
+      horasTrabajadas: horasTrabajadas,
+      minutosTrabajados: minutosTrabajados,
+      porcentajeAvance: parseInt(porcentajeAvance) || 0,
+      comentario: comentario.trim(),
+      inicioTrabajo: new Date(),
+      finTrabajo: new Date(),
+      cruzoMedianoche: false,
+      esHoraExtra: false
+    };
+    
+    tarjeta.registroHoras.push(registro);
+    tarjeta.porcentajeCompletado = parseInt(porcentajeAvance) || 0;
+    
+    const horasActuales = tarjeta.horasTotalesReales || 0;
+    const minutosActuales = tarjeta.minutosTotalesReales || 0;
+    const totalMinutosActuales = (horasActuales * 60) + minutosActuales;
+    const nuevosTotalMinutos = totalMinutosActuales + tiempoTotalMinutos;
+    
+    tarjeta.horasTotalesReales = Math.floor(nuevosTotalMinutos / 60);
+    tarjeta.minutosTotalesReales = nuevosTotalMinutos % 60;
+    
+    if (tarjeta.estadoProgreso === 'activa') {
+      tarjeta.tiempoAcumulado = 0;
+      tarjeta.fechaUltimaReanudacion = new Date();
+    }
+    
+    if (parseInt(porcentajeAvance) >= 100 && tarjeta.estado === 'en_progreso') {
+      tarjeta.fechaCompletadaEmpleado = new Date();
+      tarjeta.estado = 'finalizada';
+      tarjeta.fechaFinalizada = new Date();
+      tarjeta.estadoProgreso = 'completada';
+      tarjeta.estadoCalificacion = 'pendiente';
+      tarjeta.fechaUltimaPausa = null;
+      
+      cancelarAutoFinalizacion(tarjeta._id);
+      
+      await registrarLogTiempo(tarjeta._id, {
+        tipo: 'tarea_finalizada',
+        tiempoReal: tiempoTotalMinutos,
+        por: req.user.nombre,
+        rol: 'tecnico',
+        motivo: comentario.trim(),
+        eficiencia: 'esperado'
+      });
+      
+      const io = req.app.get('io');
+      const clients = req.app.get('clients');
+      
+      const socketTecnico = clients.get(req.user._id.toString());
+      if (socketTecnico) {
+        socketTecnico.emit('tarea-finalizada-por-ti', {
+          tareaId: tarjeta._id,
+          titulo: tarjeta.titulo,
+          mensaje: `✅ Tarea "${tarjeta.titulo}" finalizada`
+        });
+      }
+      
+      if (tarjeta.clienteInfo?.userId) {
+        const socketCliente = clients.get(tarjeta.clienteInfo.userId.toString());
+        if (socketCliente) {
+          socketCliente.emit('tarea-finalizada-por-ti', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            mensaje: `✅ Tu tarea "${tarjeta.titulo}" ha sido finalizada. Puedes calificarla cuando quieras.`
+          });
+        }
+      }
+      
+      io.emit('estado-general-actualizado', {
+        tareaId: tarjeta._id,
+        titulo: tarjeta.titulo,
+        estado: tarjeta.estado,
+        porcentaje: 100,
+        empleadoId: req.user._id,
+        mensaje: `Tarea "${tarjeta.titulo}" finalizada por ${req.user.nombre}`
+      });
+      
+      if (tarjeta.asignadoA) {
+        await User.findByIdAndUpdate(tarjeta.asignadoA, {
+          $pull: { tareasActivas: tarjeta._id }
+        });
+      }
+      
+      await tarjeta.save();
+      
+      res.json({ 
+        success: true, 
+        tarjeta,
+        completada: true,
+        mensaje: '🎉 Tarea completada'
+      });
+      return;
+    }
+    
+    await tarjeta.save();
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    const resultadoRecalculo = await recalcularTiempoPorProgreso(
+      tarjeta._id, 
+      io, 
+      clients, 
+      comentario.trim()
+    );
+    
+    const usuariosNotificar = await User.find({ 
+      rol: { $in: ['supervisor', 'tecnico'] }, 
+      activo: true 
+    }).select('_id');
+    
+    usuariosNotificar.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        socket.emit('estado-actualizado', {
+          tareaId: tarjeta._id,
+          empleadoId: req.user._id,
+          empleadoNombre: req.user.nombre,
+          porcentaje: tarjeta.porcentajeCompletado,
+          estado: tarjeta.estado,
+          tiempoRecalculado: resultadoRecalculo?.nuevoEstimado || null
+        });
+      }
+    });
+    
+    res.json({ 
+      success: true, 
+      tarjeta,
+      recalculado: resultadoRecalculo
+    });
+  } catch (error) {
+    console.error('❌ Error en progreso:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// PUT - INICIAR / PAUSAR / REANUDAR
+// ============================================================
+
+router.put('/:id/iniciar', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const tarjeta = await Tarjeta.findById(req.params.id).populate('asignadoA', 'nombre email');
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA?._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    if (!tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado === 0) {
+      return res.status(400).json({ 
+        message: 'Debes establecer un tiempo estimado antes de iniciar la tarea.' 
+      });
+    }
+    
+    await Tarjeta.updateMany(
+      { asignadoA: req.user._id, estadoProgreso: 'activa', _id: { $ne: req.params.id } },
+      { 
+        estadoProgreso: 'pausada', 
+        fechaUltimaPausa: new Date(),
+        fechaUltimaReanudacion: null 
+      }
+    );
+    
+    tarjeta.fechaInicioReal = new Date();
+    tarjeta.fechaUltimaReanudacion = new Date();
+    tarjeta.fechaUltimaPausa = null;
+    tarjeta.estadoProgreso = 'activa';
+    tarjeta.estado = 'en_progreso';
+    
+    await tarjeta.save();
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_iniciada',
+      por: req.user.nombre,
+      rol: 'tecnico',
+      motivo: 'Tarea iniciada (comenzó a trabajar)'
+    });
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    const tiempoRestante = calcularTiempoRestante(tarjeta);
+    programarAutoFinalizacion(tarjeta._id, tiempoRestante, io, clients);
+    
+    const tarjetaActualizada = await Tarjeta.findById(req.params.id)
+      .populate('asignadoA', 'nombre email')
+      .populate('asignadoPor', 'nombre');
+    
+    const usuariosNotificar = await User.find({ 
+      rol: { $in: ['supervisor', 'tecnico'] }, 
+      activo: true 
+    }).select('_id');
+    
+    usuariosNotificar.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        socket.emit('tarea-iniciada-tiempo-real', {
+          tarea: {
+            id: tarjeta._id,
+            titulo: tarjeta.titulo,
+            tiempoEstimado: tarjeta.tiempoEstimadoEmpleado,
+            fechaEstimadaFin: tarjeta.fechaEstimadaFin
+          },
+          empleado: {
+            id: req.user._id,
+            nombre: req.user.nombre,
+            rol: req.user.rol
+          }
+        });
+      }
+    });
+    
+    res.json(tarjetaActualizada);
+  } catch (error) {
+    console.error('❌ Error en iniciar:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/:id/pausar', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA?.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+    if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosTrabajados = Math.floor((ahora - inicio) / 1000 / 60);
+      tiempoTotalTrabajado += minutosTrabajados;
+    }
+    
+    tarjeta.tiempoAcumulado = tiempoTotalTrabajado;
+    tarjeta.estadoProgreso = 'pausada';
+    tarjeta.fechaUltimaPausa = new Date();
+    tarjeta.fechaUltimaReanudacion = null;
+    
+    await tarjeta.save();
+    
+    cancelarAutoFinalizacion(tarjeta._id);
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_pausada',
+      por: req.user.nombre,
+      rol: 'tecnico',
+      motivo: 'Tarea pausada',
+      tiempoTrabajado: tiempoTotalTrabajado
+    });
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    const usuariosNotificar = await User.find({ 
+      rol: { $in: ['supervisor', 'tecnico'] }, 
+      activo: true 
+    }).select('_id');
+    
+    usuariosNotificar.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        socket.emit('tarea-pausada-tiempo-real', {
+          tareaId: tarjeta._id,
+          empleadoId: req.user._id,
+          empleadoNombre: req.user.nombre
+        });
+      }
+    });
+    
+    res.json({ success: true, tarjeta });
+  } catch (error) {
+    console.error('❌ Error en pausar:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+router.put('/:id/reanudar', protect, async (req, res) => {
+  try {
+    if (req.user.rol !== 'tecnico' && req.user.rol !== 'supervisor') {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.asignadoA?.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No autorizado' });
+    }
+    
+    if (!tarjeta.tiempoEstimadoEmpleado || tarjeta.tiempoEstimadoEmpleado === 0) {
+      return res.status(400).json({ 
+        message: 'Debes establecer un tiempo estimado antes de reanudar' 
+      });
+    }
+    
+    let tiempoPausadoReciente = 0;
+    if (tarjeta.fechaUltimaPausa) {
+      const ahora = new Date();
+      const pausa = new Date(tarjeta.fechaUltimaPausa);
+      tiempoPausadoReciente = Math.floor((ahora - pausa) / 1000 / 60);
+      tarjeta.tiempoPausadoTotal = (tarjeta.tiempoPausadoTotal || 0) + tiempoPausadoReciente;
+    }
+    
+    await Tarjeta.updateMany(
+      { asignadoA: req.user._id, estadoProgreso: 'activa', _id: { $ne: req.params.id } },
+      { 
+        estadoProgreso: 'pausada', 
+        fechaUltimaPausa: new Date(),
+        fechaUltimaReanudacion: null 
+      }
+    );
+    
+    tarjeta.estadoProgreso = 'activa';
+    tarjeta.fechaUltimaReanudacion = new Date();
+    tarjeta.fechaUltimaPausa = null;
+    
+    const tiempoRestante = calcularTiempoRestante(tarjeta);
+    if (tiempoRestante > 0) {
+      tarjeta.fechaEstimadaFin = new Date(Date.now() + tiempoRestante * 60 * 1000);
+    }
+    
+    await tarjeta.save();
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_reanudada',
+      por: req.user.nombre,
+      rol: 'tecnico',
+      motivo: `Tarea reanudada (pausada ${tiempoPausadoReciente} min)`,
+      tiempoTrabajado: tiempoPausadoReciente
+    });
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    programarAutoFinalizacion(tarjeta._id, tiempoRestante, io, clients);
+    
+    const tarjetaActualizada = await Tarjeta.findById(req.params.id)
+      .populate('asignadoA', 'nombre email')
+      .populate('asignadoPor', 'nombre');
+    
+    const usuariosNotificar = await User.find({ 
+      rol: { $in: ['supervisor', 'tecnico'] }, 
+      activo: true 
+    }).select('_id');
+    
+    usuariosNotificar.forEach(usuario => {
+      const socket = clients.get(usuario._id.toString());
+      if (socket) {
+        socket.emit('tarea-reanudada-tiempo-real', {
+          tareaId: tarjeta._id,
+          empleadoId: req.user._id,
+          empleadoNombre: req.user.nombre,
+          tiempoPausado: tiempoPausadoReciente,
+          fechaEstimadaFin: tarjeta.fechaEstimadaFin
+        });
+      }
+    });
+    
+    res.json({ 
+      success: true, 
+      tarjeta: tarjetaActualizada,
+      tiempoPausado: tiempoPausadoReciente,
+      fechaEstimadaFin: tarjeta.fechaEstimadaFin
+    });
+  } catch (error) {
+    console.error('❌ Error en reanudar:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ============================================================
+// PUT - CALIFICAR TAREA
+// ============================================================
+
+router.put('/:id/calificar', protect, async (req, res) => {
+  try {
+    const { puntaje, comentario } = req.body;
+    
+    const tarjeta = await Tarjeta.findById(req.params.id);
+    if (!tarjeta) {
+      return res.status(404).json({ message: 'Tarea no encontrada' });
+    }
+    
+    if (tarjeta.estado !== 'finalizada') {
+      return res.status(400).json({ message: 'Esta tarea aún no ha sido finalizada' });
+    }
+    
+    if (tarjeta.clienteInfo.userId?.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: 'No puedes calificar esta tarea' });
+    }
+    
+    if (tarjeta.calificacion?.puntaje) {
+      return res.status(400).json({ message: 'Esta tarea ya ha sido calificada' });
+    }
+    
+    tarjeta.calificacion = {
+      puntaje,
+      comentario: comentario || '',
+      fecha: new Date(),
+      clienteId: req.user._id
+    };
+    tarjeta.estadoCalificacion = 'calificada';
+    
+    await tarjeta.save();
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_finalizada',
+      por: req.user.nombre,
+      rol: 'usuario',
+      motivo: `Tarea calificada con ${puntaje} estrellas`
+    });
+    
+    const io = req.app.get('io');
+    const clients = req.app.get('clients');
+    
+    if (tarjeta.asignadoA) {
+      const socketEmpleado = clients.get(tarjeta.asignadoA.toString());
+      if (socketEmpleado) {
+        socketEmpleado.emit('tarea-calificada', {
+          tareaId: tarjeta._id,
+          titulo: tarjeta.titulo,
+          puntaje,
+          comentario
+        });
+      }
+    }
+    
+    res.json({ success: true, tarjeta });
+  } catch (error) {
+    console.error('❌ Error en calificar:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+export default router; 
+================================= 
+scripts\reset.js 
+================================= 
+ 
+// scripts/reset.js
+// 
+// PROPÓSITO: Resetear la base de datos para el sistema de login Zimbra
+// 
+// REGLAS:
+//   - Rol por defecto: usuario
+//   - Supervisor inicial: grover.plaza@senado.gob.bo (se crea automáticamente)
+//   - Solo supervisores pueden asignar roles
+//   - Siempre debe haber al menos un supervisor
+//   - El resto de usuarios se crean al primer login con Zimbra
+//
+// USO:
+//   node scripts/reset.js
+//
+
+import mongoose from 'mongoose';
+import dotenv from 'dotenv';
+import User from '../models/User.js';
+import Tarjeta from '../models/Tarjeta.js';
+
+dotenv.config();
+
+// ============================================================
+// CONFIGURACIÓN
+// ============================================================
+
+const SUPERVISOR_INICIAL = {
+    email: 'grover.plaza@senado.gob.bo',
+    nombre: 'GROVER PLAZA QUIROGA',
+    rol: 'supervisor',
+    zimbraUid: 'grover.plaza',
+    telefono: '',
+    password: 'zimbra_user'
+};
+
+// ============================================================
+// FUNCIÓN PRINCIPAL
+// ============================================================
+
+async function resetCompleto() {
+    console.log('\n');
+    console.log('╔════════════════════════════════════════════════════════════════╗');
+    console.log('║  🔄 RESET COMPLETO DE BASE DE DATOS                          ║');
+    console.log('║  Sistema de login Zimbra                                    ║');
+    console.log('╚════════════════════════════════════════════════════════════════╝');
+    console.log('\n');
+
+    try {
+        // 1. Conectar a MongoDB
+        console.log('📡 Conectando a MongoDB...');
+        await mongoose.connect(process.env.MONGODB_URI);
+        console.log('   ✅ Conectado\n');
+
+        const db = mongoose.connection.db;
+        console.log(`   📊 Base de datos: ${db.databaseName}\n`);
+
+        // 2. Contar antes de eliminar
+        const countBeforeUsers = await User.countDocuments();
+        const countBeforeTarjetas = await Tarjeta.countDocuments();
+        console.log(`   📋 Antes de limpiar:`);
+        console.log(`      - Usuarios: ${countBeforeUsers}`);
+        console.log(`      - Tarjetas: ${countBeforeTarjetas}\n`);
+
+        // 3. ELIMINAR TODO
+        console.log('🗑️  Eliminando datos existentes...');
+        const userDeleteResult = await User.deleteMany({});
+        const tarjetaDeleteResult = await Tarjeta.deleteMany({});
+        console.log(`   ✅ Usuarios eliminados: ${userDeleteResult.deletedCount}`);
+        console.log(`   ✅ Tarjetas eliminadas: ${tarjetaDeleteResult.deletedCount}\n`);
+
+        // 4. Crear SUPERVISOR INICIAL
+        console.log('👔 Creando SUPERVISOR INICIAL...');
+        const supervisor = new User({
+            nombre: SUPERVISOR_INICIAL.nombre,
+            email: SUPERVISOR_INICIAL.email,
+            rol: SUPERVISOR_INICIAL.rol,
+            zimbraUid: SUPERVISOR_INICIAL.zimbraUid,
+            telefono: SUPERVISOR_INICIAL.telefono,
+            password: SUPERVISOR_INICIAL.password,
+            activo: true,
+            configuracionAutoCierre: {
+                habilitado: true,
+                revisarColumna: 'revision_cliente',
+                diasMaximosCliente: 5,
+                diasMaximosSupervisor: 3,
+                accionAuto: 'finalizar',
+                notificarAntesDias: 1,
+                excepcionesEmpleados: []
+            }
+        });
+        await supervisor.save();
+        console.log(`   ✅ ${supervisor.email} - ${supervisor.rol}\n`);
+
+        // 5. MOSTRAR RESUMEN
+        console.log('╔════════════════════════════════════════════════════════════════╗');
+        console.log('║  📊 RESUMEN FINAL                                            ║');
+        console.log('╠════════════════════════════════════════════════════════════════╣');
+        console.log(`║  Total usuarios: 1                                           ║`);
+        console.log(`║  ├─ 👔 Supervisores: 1                                      ║`);
+        console.log(`║  ├─ 👷 Técnicos:    0 (se crean al primer login)            ║`);
+        console.log(`║  └─ 👤 Usuarios:    0 (se crean al primer login)            ║`);
+        console.log('╠════════════════════════════════════════════════════════════════╣');
+        console.log(`║  👑 SUPERVISOR INICIAL: ${SUPERVISOR_INICIAL.email}`);
+        console.log('╠════════════════════════════════════════════════════════════════╣');
+        console.log('║  🔑 Para iniciar sesión usa tus credenciales de Zimbra       ║');
+        console.log('║  📧 El supervisor inicial es: grover.plaza@senado.gob.bo     ║');
+        console.log('║  📌 Nuevos usuarios se crean automáticamente al loguearse    ║');
+        console.log('║  📌 Rol por defecto: usuario                                ║');
+        console.log('╚════════════════════════════════════════════════════════════════╝');
+        console.log('\n');
+
+        // 6. DIAGNÓSTICO FINAL
+        const countSupervisores = await User.countDocuments({ rol: 'supervisor', activo: true });
+        if (countSupervisores === 0) {
+            console.warn('⚠️ ¡ADVERTENCIA! No hay supervisores en el sistema.');
+            console.warn('   Esto puede causar problemas. Asegúrate de tener al menos un supervisor.');
+        } else {
+            console.log(`✅ Verificación: ${countSupervisores} supervisor(es) en el sistema (mínimo requerido: 1)`);
+        }
+
+        console.log('\n✨ Base de datos inicializada exitosamente');
+        console.log('✅ Listo para usar el sistema con login Zimbra\n');
+
+    } catch (error) {
+        console.error('❌ ERROR:', error);
+        console.error('   Detalles:', error.message);
+        process.exit(1);
+    } finally {
+        await mongoose.disconnect();
+        console.log('\n🔌 Desconectado de MongoDB');
+        process.exit(0);
+    }
+}
+
+// ============================================================
+// EJECUTAR
+// ============================================================
+
+resetCompleto(); 
+================================= 
+services\autoCierreService.js 
+================================= 
+ 
+// services/autoCierreService.js
+import Tarjeta from '../models/Tarjeta.js';
+import User from '../models/User.js';
+
+// ============================================================
+// ALMACENAR TIMEOUTS POR TAREA
+// ============================================================
+export const timeouts = new Map();
+
+// ============================================================
+// FUNCIÓN PARA CALCULAR EFICIENCIA
+// ============================================================
+const calcularEficiencia = (tiempoEstimado, tiempoReal) => {
+  if (!tiempoEstimado || tiempoEstimado <= 0) return 'esperado';
+  
+  const diferencia = ((tiempoReal - tiempoEstimado) / tiempoEstimado) * 100;
+  
+  if (diferencia <= -20) return 'mayor_a_esperado';
+  if (diferencia <= 20) return 'esperado';
+  if (diferencia <= 50) return 'menor_a_esperado';
+  return 'critico';
+};
+
+// ============================================================
+// FUNCIÓN PARA REGISTRAR LOG DE TIEMPOS
+// ============================================================
+export const registrarLogTiempo = async (tarjetaId, data) => {
+  try {
+    const tarjeta = await Tarjeta.findById(tarjetaId);
+    if (!tarjeta) return null;
+    
+    const logEntry = {
+      timestamp: new Date(),
+      tipo: data.tipo,
+      tiempoMinutos: data.tiempoMinutos || 0,
+      tiempoAnterior: data.tiempoAnterior || 0,
+      tiempoReal: data.tiempoReal || 0,
+      diferencia: data.diferencia || 0,
+      progreso: data.progreso || 0,
+      tiempoTrabajado: data.tiempoTrabajado || 0,
+      por: data.por || 'Sistema',
+      rol: data.rol || 'Sistema',
+      motivo: data.motivo || '',
+      eficiencia: data.eficiencia || 'esperado',
+      tiempoRestante: data.tiempoRestante || 0,
+      tecnicoAnterior: data.tecnicoAnterior || '',
+      tecnicoNuevo: data.tecnicoNuevo || '',
+      alerta: data.alerta || false
+    };
+    
+    tarjeta.logTiempos.push(logEntry);
+    await tarjeta.save();
+    
+    return logEntry;
+  } catch (error) {
+    console.error('❌ Error registrando log de tiempo:', error);
+    return null;
+  }
+};
+
+// ============================================================
+// FUNCIÓN PARA CALCULAR TIEMPO RESTANTE
+// ============================================================
+const calcularTiempoRestante = (tarjeta) => {
+  const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado || 0;
+  const tiempoTrabajado = tarjeta.tiempoAcumulado || 0;
+  return Math.max(0, tiempoEstimado - tiempoTrabajado);
+};
+
+// ============================================================
+// FUNCIÓN PARA RECALCULAR TIEMPO ESTIMADO BASADO EN PROGRESO
+// ============================================================
+export const recalcularTiempoPorProgreso = async (tarjetaId, io, clients, comentarioTecnico = '') => {
+  try {
+    const tarjeta = await Tarjeta.findById(tarjetaId).populate('asignadoA', 'nombre email rol');
+    if (!tarjeta) return null;
+    
+    let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+    if (tarjeta.estadoProgreso === 'activa' && tarjeta.fechaUltimaReanudacion) {
+      const ahora = new Date();
+      const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+      const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+      tiempoTotalTrabajado += minutosDesdeReanudacion;
+    }
+    
+    const progresoActual = tarjeta.porcentajeCompletado || 0;
+    const tiempoEstimadoActual = tarjeta.tiempoEstimadoEmpleado || 0;
+    
+    if (progresoActual <= 0 || tiempoEstimadoActual <= 0) return null;
+    
+    const nuevoEstimado = Math.round((tiempoTotalTrabajado / progresoActual) * 100);
+    
+    if (nuevoEstimado < 1) return null;
+    
+    const diferencia = nuevoEstimado - tiempoEstimadoActual;
+    
+    if (Math.abs(diferencia) <= 10) return null;
+    
+    const eficiencia = calcularEficiencia(tiempoEstimadoActual, tiempoTotalTrabajado);
+    const esCritico = eficiencia === 'critico';
+    
+    console.log(`📊 RECALCULANDO TIEMPO: ${tarjeta.titulo}`);
+    console.log(`   Progreso: ${progresoActual}%`);
+    console.log(`   Tiempo trabajado: ${tiempoTotalTrabajado} min`);
+    console.log(`   Estimado anterior: ${tiempoEstimadoActual} min`);
+    console.log(`   Nuevo estimado: ${nuevoEstimado} min`);
+    console.log(`   Diferencia: ${diferencia > 0 ? '+' : ''}${diferencia} min`);
+    console.log(`   Eficiencia: ${eficiencia}`);
+    console.log(`   Comentario técnico: ${comentarioTecnico || '(sin comentario)'}`);
+    
+    const tiempoAnterior = tiempoEstimadoActual;
+    
+    tarjeta.tiempoEstimadoEmpleado = nuevoEstimado;
+    
+    const tiempoRestante = Math.max(0, nuevoEstimado - tiempoTotalTrabajado);
+    tarjeta.fechaEstimadaFin = new Date(Date.now() + tiempoRestante * 60 * 1000);
+    
+    await tarjeta.save();
+    
+    const motivoFinal = comentarioTecnico.trim() 
+      ? comentarioTecnico.trim() 
+      : `Progreso ${progresoActual}% en ${tiempoTotalTrabajado} min`;
+    
+    const logEntry = await registrarLogTiempo(tarjeta._id, {
+      tipo: 'recalculado_progreso',
+      progreso: progresoActual,
+      tiempoTrabajado: tiempoTotalTrabajado,
+      tiempoMinutos: nuevoEstimado,
+      tiempoAnterior: tiempoAnterior,
+      diferencia: diferencia,
+      eficiencia: eficiencia,
+      tiempoRestante: nuevoEstimado - tiempoTotalTrabajado,
+      por: tarjeta.asignadoA?.nombre || 'Sistema',
+      rol: tarjeta.asignadoA?.rol || 'Sistema',
+      motivo: motivoFinal,
+      alerta: esCritico
+    });
+    
+    if (esCritico && io && clients) {
+      const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id');
+      for (const supervisor of supervisores) {
+        const socket = clients.get(supervisor._id.toString());
+        if (socket) {
+          socket.emit('alerta-progreso-critico', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            tecnico: tarjeta.asignadoA?.nombre || 'Sin asignar',
+            progreso: progresoActual,
+            tiempoTrabajado: tiempoTotalTrabajado,
+            tiempoEstimadoAnterior: tiempoAnterior,
+            tiempoEstimadoNuevo: nuevoEstimado,
+            eficiencia: eficiencia,
+            motivo: motivoFinal,
+            mensaje: `⚠️ La tarea "${tarjeta.titulo}" tiene un progreso crítico: ${progresoActual}% en ${tiempoTotalTrabajado} min (estimado ${nuevoEstimado} min)`
+          });
+        }
+      }
+    }
+    
+    return { nuevoEstimado, diferencia, eficiencia, logEntry };
+    
+  } catch (error) {
+    console.error('❌ Error recalculando tiempo por progreso:', error);
+    return null;
+  }
+};
+
+// ============================================================
+// AUTO-FINALIZAR TAREA
+// 🔥 CAMBIO: ahora acepta un parámetro opcional `tiempoRealForzado`
+//    para congelar el tiempo real al momento de programar el auto-cierre.
+//    Esto evita que retrasos del event loop inflen el tiempo registrado.
+// ============================================================
+export const autoFinalizarTarea = async (tareaId, io, clients, tiempoRealForzado = null) => {
+  try {
+    console.log(`🔥 [AUTO-CIERRE] Evento real para tarea: ${tareaId}`);
+    
+    const tarjeta = await Tarjeta.findById(tareaId).populate('asignadoA', 'nombre email');
+    
+    if (!tarjeta) {
+      console.log(`❌ Tarea ${tareaId} no encontrada`);
+      timeouts.delete(tareaId);
+      return;
+    }
+    
+    if (tarjeta.estado !== 'en_progreso') {
+      console.log(`⏭️ Tarea ${tareaId} ya no está en progreso (${tarjeta.estado})`);
+      timeouts.delete(tareaId);
+      return;
+    }
+    
+    if (tarjeta.estadoProgreso !== 'activa') {
+      console.log(`⏭️ Tarea ${tareaId} está pausada, reprogramando...`);
+      const tiempoRestante = calcularTiempoRestante(tarjeta);
+      if (tiempoRestante > 0) {
+        programarAutoFinalizacion(tareaId, tiempoRestante, io, clients);
+      }
+      return;
+    }
+    
+    // ============================================================
+    // 🔥 CALCULAR TIEMPO TOTAL TRABAJADO
+    // ============================================================
+    let tiempoTotalTrabajado;
+    
+    if (tiempoRealForzado !== null && tiempoRealForzado !== undefined) {
+      // 🔥 NUEVO: Usar el tiempo congelado al momento de programar el auto-cierre.
+      // Esto evita que retrasos del event loop inflen el tiempo registrado.
+      tiempoTotalTrabajado = tiempoRealForzado;
+      console.log(`   🔒 Usando tiempo CONGELADO: ${tiempoTotalTrabajado} min`);
+      console.log(`      (evita que retrasos del event loop inflen el tiempo)`);
+    } else {
+      // Cálculo normal (para auto-finalizaciones forzadas manualmente)
+      tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+      if (tarjeta.fechaUltimaReanudacion) {
+        const ahora = new Date();
+        const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+        const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+        tiempoTotalTrabajado += minutosDesdeReanudacion;
+      }
+      console.log(`   📐 Calculando tiempo real desde fechaUltimaReanudacion`);
+    }
+    
+    const tiempoEstimado = tarjeta.tiempoEstimadoEmpleado || 0;
+    const diferencia = tiempoTotalTrabajado - tiempoEstimado;
+    const eficiencia = calcularEficiencia(tiempoEstimado, tiempoTotalTrabajado);
+    
+    console.log(`✅ AUTO-FINALIZANDO: ${tarjeta.titulo}`);
+    console.log(`   Tiempo estimado: ${tiempoEstimado} min`);
+    console.log(`   Tiempo trabajado: ${tiempoTotalTrabajado} min`);
+    console.log(`   Diferencia: ${diferencia > 0 ? '+' : ''}${diferencia} min`);
+    console.log(`   Eficiencia: ${eficiencia}`);
+    
+    // 🔥 Finalizar directamente, sin pasar por revisión
+    tarjeta.estado = 'finalizada';
+    tarjeta.fechaCompletadaEmpleado = new Date();
+    tarjeta.fechaFinalizada = new Date();
+    tarjeta.estadoProgreso = 'completada';
+    tarjeta.porcentajeCompletado = 100;
+    tarjeta.tiempoAcumulado = tiempoTotalTrabajado;
+    tarjeta.fechaUltimaPausa = null;
+    // 🔥 La calificación queda pendiente para que el cliente pueda calificar después (opcional)
+    tarjeta.estadoCalificacion = 'pendiente';
+    
+    const horasReales = Math.floor(tiempoTotalTrabajado / 60);
+    const minutosReales = tiempoTotalTrabajado % 60;
+    tarjeta.horasTotalesReales = horasReales;
+    tarjeta.minutosTotalesReales = minutosReales;
+    
+    await tarjeta.save();
+    
+    await registrarLogTiempo(tarjeta._id, {
+      tipo: 'tarea_auto_finalizada',
+      tiempoMinutos: tiempoEstimado,
+      tiempoReal: tiempoTotalTrabajado,
+      diferencia: diferencia,
+      eficiencia: eficiencia,
+      por: 'Sistema (auto-cierre)',
+      rol: 'Sistema',
+      motivo: `Auto-finalizada por cumplimiento de tiempo (${tiempoTotalTrabajado} min)`
+    });
+    
+    if (io && clients) {
+      // Notificar al técnico
+      if (tarjeta.asignadoA) {
+        const socketEmpleado = clients.get(tarjeta.asignadoA._id.toString());
+        if (socketEmpleado) {
+          socketEmpleado.emit('tarea-auto-finalizada', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            mensaje: `✅ Tarea completada automáticamente (${diferencia > 0 ? diferencia + ' min extra' : 'tiempo cumplido'})`,
+            empleadoNombre: tarjeta.asignadoA.nombre,
+            tiempoEstimado: tiempoEstimado,
+            tiempoReal: tiempoTotalTrabajado,
+            eficiencia: eficiencia
+          });
+          console.log(`   ✅ Socket emitido a técnico: ${tarjeta.asignadoA.nombre}`);
+        }
+      }
+      
+      // Notificar al cliente si existe
+      if (tarjeta.clienteInfo?.userId) {
+        const socketCliente = clients.get(tarjeta.clienteInfo.userId.toString());
+        if (socketCliente) {
+          socketCliente.emit('tarea-finalizada-por-ti', {
+            tareaId: tarjeta._id,
+            titulo: tarjeta.titulo,
+            mensaje: `✅ Tu tarea "${tarjeta.titulo}" ha sido finalizada. Puedes calificarla cuando quieras.`
+          });
+        }
+      }
+      
+      // Broadcast general
+      io.emit('estado-general-actualizado', {
+        tareaId: tarjeta._id,
+        titulo: tarjeta.titulo,
+        estado: tarjeta.estado,
+        porcentaje: 100,
+        accion: 'auto-finalizada',
+        mensaje: `Tarea "${tarjeta.titulo}" auto-finalizada`
+      });
+      
+      // 🔥 Notificar específicamente a supervisores para actualizar Kanban
+      const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id');
+      supervisores.forEach(sup => {
+        const socketSup = clients.get(sup._id.toString());
+        if (socketSup) {
+          socketSup.emit('kanban-actualizar', {
+            tareaId: tarjeta._id,
+            tarea: tarjeta,
+            accion: 'auto-finalizada',
+            mensaje: `✅ Tarea auto-finalizada: ${tarjeta.titulo}`
+          });
+        }
+      });
+    }
+    
+    timeouts.delete(tareaId);
+    console.log(`✅ [AUTO-CIERRE] Tarea ${tareaId} finalizada exitosamente`);
+    
+    return { success: true, tarjeta };
+    
+  } catch (error) {
+    console.error('❌ [AUTO-CIERRE] Error:', error);
+    timeouts.delete(tareaId);
+    return { success: false, error: error.message };
+  }
+};
+
+// ============================================================
+// PROGRAMAR AUTO-FINALIZACIÓN
+// 🔥 CAMBIO: ahora calcula y congela el tiempo real en el momento
+//    de programar, para que aunque el timer se retrase, el tiempo
+//    registrado sea exactamente el estimado.
+// ============================================================
+export const programarAutoFinalizacion = (tarjetaId, tiempoMinutos, io, clients) => {
+  if (timeouts.has(tarjetaId)) {
+    clearTimeout(timeouts.get(tarjetaId));
+    timeouts.delete(tarjetaId);
+  }
+  
+  if (!tiempoMinutos || tiempoMinutos <= 0) return;
+  
+  // 🔥 Margen de 30 segundos para dar tiempo a que el técnico finalice manualmente
+  const tiempoMs = (tiempoMinutos * 60 * 1000) + (30 * 1000);
+  
+  console.log(`⏰ Programando auto-finalización para tarea ${tarjetaId} en ${tiempoMinutos} minutos`);
+  console.log(`   🔒 Tiempo real a registrar: ${tiempoMinutos} min (congelado)`);
+  
+  const timeoutId = setTimeout(async () => {
+    console.log(`🔥 [EVENTO] Timeout disparado para tarea ${tarjetaId}`);
+    console.log(`   🔒 Pasando tiempo congelado: ${tiempoMinutos} min`);
+    
+    // 🔥 NUEVO: Pasar el tiempo congelado (el estimado) para que
+    // autoFinalizarTarea lo use en lugar de recalcularlo.
+    // Esto evita que retrasos del event loop inflen el tiempo registrado.
+    await autoFinalizarTarea(tarjetaId, io, clients, tiempoMinutos);
+  }, tiempoMs);
+  
+  timeouts.set(tarjetaId, timeoutId);
+};
+
+// ============================================================
+// CANCELAR AUTO-FINALIZACIÓN
+// ============================================================
+export const cancelarAutoFinalizacion = (tarjetaId) => {
+  if (timeouts.has(tarjetaId)) {
+    clearTimeout(timeouts.get(tarjetaId));
+    timeouts.delete(tarjetaId);
+    console.log(`⏹️ Auto-finalización cancelada para tarea ${tarjetaId}`);
+    return true;
+  }
+  return false;
+};
+
+// ============================================================
+// VERIFICAR TAREAS ACTIVAS AL INICIAR
+// ============================================================
+export const verificarTareasActivas = async (io, clients) => {
+  try {
+    console.log('🔍 Verificando tareas activas existentes...');
+    
+    const tareasActivas = await Tarjeta.find({
+      estado: 'en_progreso',
+      estadoProgreso: 'activa',
+      tiempoEstimadoEmpleado: { $gt: 0 }
+    }).populate('asignadoA', 'nombre email');
+    
+    console.log(`📊 Encontradas ${tareasActivas.length} tareas activas`);
+    
+    for (const tarjeta of tareasActivas) {
+      let tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
+      
+      if (tarjeta.fechaUltimaReanudacion) {
+        const ahora = new Date();
+        const inicio = new Date(tarjeta.fechaUltimaReanudacion);
+        const minutosDesdeReanudacion = Math.floor((ahora - inicio) / 1000 / 60);
+        tiempoTotalTrabajado += minutosDesdeReanudacion;
+      }
+      
+      const tiempoRestante = Math.max(0, tarjeta.tiempoEstimadoEmpleado - tiempoTotalTrabajado);
+      
+      if (tiempoRestante <= 0) {
+        console.log(`⚠️ Tarea ${tarjeta.titulo} ya excedió el tiempo, finalizando...`);
+        // 🔥 Para tareas que ya excedieron, usamos el tiempo estimado como congelado
+        // (no queremos que se registre tiempo extra por el retraso del servidor)
+        await autoFinalizarTarea(tarjeta._id, io, clients, tarjeta.tiempoEstimadoEmpleado);
+      } else {
+        console.log(`⏰ Reprogramando tarea ${tarjeta.titulo}: ${tiempoRestante} min restantes`);
+        programarAutoFinalizacion(tarjeta._id, tiempoRestante, io, clients);
+      }
+    }
+    
+    console.log('✅ Verificación completada');
+    
+  } catch (error) {
+    console.error('❌ Error en verificarTareasActivas:', error);
+  }
+};
+
+// ============================================================
+// INICIAR SERVICIO
+// ============================================================
+export const iniciarAutoCierreService = (io, clients) => {
+  console.log('⏰ [SERVICIO] Iniciando auto-cierre con eventos reales...');
+  console.log(`   📡 io: ${io ? '✅ Disponible' : '❌ No disponible'}`);
+  console.log(`   👥 clients: ${clients ? '✅ Disponible' : '❌ No disponible'}`);
+  console.log(`   ⏱️ Usando setTimeout (eventos reales, no polling)`);
+  console.log(`   🔒 Tiempo real CONGELADO al programar (evita inflado por retrasos)`);
+  
+  setTimeout(() => {
+    verificarTareasActivas(io, clients);
+  }, 3000);
+  
+  console.log('⏰ [SERVICIO] Auto-cierre de tareas activo (basado en eventos)');
+}; 
+Total archivos: 15 

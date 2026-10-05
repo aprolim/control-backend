@@ -11,7 +11,7 @@ import empleadoRoutes from './routes/empleados.js';
 import estadisticasRoutes from './routes/estadisticas.js';
 import solicitudRoutes from './routes/solicitudes.js';
 import configuracionRoutes from './routes/configuracion.js';
-import { iniciarAutoCierreService } from './services/autoCierreService.js';
+import { iniciarAutoCierreService, timeouts } from './services/autoCierreService.js';
 import os from 'os';
 
 dotenv.config();
@@ -76,17 +76,19 @@ const clients = new Map();
 io.on('connection', (socket) => {
   console.log('🔌 Cliente Socket.IO conectado:', socket.id);
   
-  // Unir usuario a su sala personal
   socket.on('join', (userId) => {
     if (userId) {
       socket.userId = userId;
       clients.set(userId.toString(), socket);
-      
-      // Unir a sala personal
       socket.join(`user:${userId}`);
       
-      console.log(`👤 Usuario ${userId} unido (socket: ${socket.id})`);
-      console.log(`   👥 Usuarios conectados: ${clients.size}`);
+      console.log('========================================');
+      console.log(`👤 [Socket] USUARIO UNIDO AL SOCKET`);
+      console.log(`   👤 UserId: ${userId}`);
+      console.log(`   📡 Socket ID: ${socket.id}`);
+      console.log(`   👥 Total clients conectados: ${clients.size}`);
+      console.log(`   📋 Usuarios: ${Array.from(clients.keys()).join(', ')}`);
+      console.log('========================================');
       
       socket.emit('connected', { 
         userId, 
@@ -94,143 +96,146 @@ io.on('connection', (socket) => {
         socketId: socket.id,
         clientsCount: clients.size
       });
+    } else {
+      console.warn('⚠️ [Socket] join sin userId:', socket.id);
     }
   });
   
   // ============================================================
-  // EVENTOS DE TIEMPO REAL
+  // TODOS LOS EVENTOS DE TIEMPO REAL
   // ============================================================
   
-  // Nueva tarea disponible
   socket.on('nueva-tarea-disponible', (data) => {
     console.log(`📢 [Socket] Nueva tarea disponible:`, data.tarea?.titulo);
     io.emit('nueva-tarea-disponible', data);
   });
   
-  // Tarea asignada
   socket.on('tarea-asignada', (data) => {
     console.log(`📢 [Socket] Tarea asignada:`, data.tarea?.titulo);
     io.emit('tarea-asignada', data);
   });
   
-  // Tarea tomada
   socket.on('tarea-tomada', (data) => {
     console.log(`📢 [Socket] Tarea tomada por:`, data.empleado?.nombre);
     io.emit('tarea-tomada', data);
   });
   
-  // Estado actualizado (progreso)
+  // 🔥 NUEVO: Evento específico para actualizar el Kanban del supervisor
+  socket.on('kanban-actualizar', (data) => {
+    console.log(`📋 [Socket] Kanban actualizar:`, data.mensaje);
+    io.emit('kanban-actualizar', data);
+  });
+  
   socket.on('estado-actualizado', (data) => {
     console.log(`📢 [Socket] Estado actualizado: ${data.porcentaje}%`);
     io.emit('estado-actualizado', data);
   });
   
-  // Tarea lista para revisión (supervisor)
   socket.on('tarea-lista-para-revision', (data) => {
     console.log(`📢 [Socket] Tarea lista para revisión:`, data.titulo);
     io.emit('tarea-lista-para-revision', data);
   });
   
-  // Tarea lista para calificar (usuario)
   socket.on('tarea-lista-para-calificar', (data) => {
     console.log(`📢 [Socket] Tarea lista para calificar:`, data.titulo);
     io.emit('tarea-lista-para-calificar', data);
   });
   
-  // Tarea calificada
   socket.on('tarea-calificada', (data) => {
     console.log(`📢 [Socket] Tarea calificada: ${data.puntaje}★`);
     io.emit('tarea-calificada', data);
   });
   
-  // 🔥 Tarea auto-finalizada (evento real)
   socket.on('tarea-auto-finalizada', (data) => {
     console.log(`📢 [Socket] Tarea auto-finalizada:`, data.titulo);
     io.emit('tarea-auto-finalizada', data);
   });
   
-  // Estado general actualizado
   socket.on('estado-general-actualizado', (data) => {
     console.log(`📢 [Socket] Estado general actualizado:`, data.titulo);
     io.emit('estado-general-actualizado', data);
   });
   
-  // Tarea iniciada
   socket.on('tarea-iniciada-tiempo-real', (data) => {
     console.log(`📢 [Socket] Tarea iniciada:`, data.tarea?.titulo);
     io.emit('tarea-iniciada-tiempo-real', data);
   });
   
-  // Tarea pausada
   socket.on('tarea-pausada-tiempo-real', (data) => {
     console.log(`📢 [Socket] Tarea pausada:`, data.tareaId);
     io.emit('tarea-pausada-tiempo-real', data);
   });
   
-  // Tarea reanudada
   socket.on('tarea-reanudada-tiempo-real', (data) => {
     console.log(`📢 [Socket] Tarea reanudada:`, data.tareaId);
     io.emit('tarea-reanudada-tiempo-real', data);
   });
   
-  // Tarea completada automáticamente
   socket.on('tarea-completada-automaticamente', (data) => {
     console.log(`📢 [Socket] Tarea completada automáticamente:`, data.titulo);
     io.emit('tarea-completada-automaticamente', data);
   });
   
-  // Tarea finalizada sin cliente
   socket.on('tarea-finalizada-sin-cliente', (data) => {
     console.log(`📢 [Socket] Tarea finalizada sin cliente:`, data.titulo);
     io.emit('tarea-finalizada-sin-cliente', data);
   });
   
-  // Tarea por expirar
   socket.on('tarea-por-expirar', (data) => {
     console.log(`📢 [Socket] Tarea por expirar:`, data.titulo);
     io.emit('tarea-por-expirar', data);
   });
   
-  // Tarea aprobada por supervisor
   socket.on('tarea-aprobada-por-supervisor', (data) => {
     console.log(`📢 [Socket] Tarea aprobada por supervisor:`, data.titulo);
     io.emit('tarea-aprobada-por-supervisor', data);
   });
   
-  // Tarea aprobada y enviada al cliente
   socket.on('tarea-aprobada-enviada-cliente', (data) => {
     console.log(`📢 [Socket] Tarea aprobada y enviada al cliente:`, data.titulo);
     io.emit('tarea-aprobada-enviada-cliente', data);
   });
   
-  // Tarea enviada a cliente
   socket.on('tarea-enviada-a-cliente', (data) => {
     console.log(`📢 [Socket] Tarea enviada a cliente:`, data.titulo);
     io.emit('tarea-enviada-a-cliente', data);
   });
   
-  // Nueva tarea asignada
   socket.on('nueva-tarea-asignada', (data) => {
     console.log(`📢 [Socket] Nueva tarea asignada:`, data.tarea?.titulo);
     io.emit('nueva-tarea-asignada', data);
   });
   
-  // Rol actualizado
   socket.on('rol-actualizado', (data) => {
     console.log(`📢 [Socket] Rol actualizado: ${data.nuevoRol}`);
     io.emit('rol-actualizado', data);
   });
   
-  // Tarea finalizada sin calificación
   socket.on('tarea-finalizada-sin-calificacion', (data) => {
     console.log(`📢 [Socket] Tarea finalizada sin calificación:`, data.titulo);
     io.emit('tarea-finalizada-sin-calificacion', data);
   });
   
-  // Tarea por revisar
   socket.on('tarea-por-revisar', (data) => {
     console.log(`📢 [Socket] Tarea por revisar:`, data.titulo);
     io.emit('tarea-por-revisar', data);
+  });
+  
+  socket.on('tarea-reasignada', (data) => {
+    console.log(`📢 [Socket] Tarea reasignada:`, data.titulo);
+    io.emit('tarea-reasignada', data);
+  });
+  
+  // 🔥 Alerta de progreso crítico
+  socket.on('alerta-progreso-critico', (data) => {
+    console.log(`📢 [Socket] ⚠️ ALERTA CRÍTICA:`, data.titulo);
+    io.emit('alerta-progreso-critico', data);
+  });
+  
+  // 🔥 Tarea finalizada por ti
+  socket.on('tarea-finalizada-por-ti', (data) => {
+    console.log(`📢 [Socket] Tarea finalizada por ti:`, data.titulo);
+    io.emit('tarea-finalizada-por-ti', data);
   });
   
   // ============================================================
@@ -247,7 +252,6 @@ io.on('connection', (socket) => {
   });
 });
 
-// Pasar io y clients a las rutas
 app.set('io', io);
 app.set('clients', clients);
 
@@ -261,14 +265,14 @@ app.use('/api/estadisticas', estadisticasRoutes);
 app.use('/api/solicitudes', solicitudRoutes);
 app.use('/api/configuracion', configuracionRoutes);
 
-// Health check
+// Health check con estadísticas
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(), 
     ip: LOCAL_IP,
     clients: clients.size,
-    timeouts: require('./services/autoCierreService.js').timeouts?.size || 0
+    timeouts: timeouts.size
   });
 });
 
@@ -293,7 +297,6 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`🔌 Socket:   ws://${LOCAL_IP}:${PORT}/socket.io`);
   console.log('========================================');
   
-  // Iniciar auto-cierre con eventos reales
   iniciarAutoCierreService(io, clients);
 });
 

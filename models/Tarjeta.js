@@ -50,6 +50,91 @@ const toleranciaSchema = new mongoose.Schema({
   }
 });
 
+// ============================================================
+// LOG DE TIEMPOS (HISTORIAL COMPLETO)
+// ============================================================
+const logTiempoSchema = new mongoose.Schema({
+  timestamp: {
+    type: Date,
+    default: Date.now
+  },
+  tipo: {
+    type: String,
+    enum: [
+      'sugerido_supervisor',
+      'estimado_tecnico',
+      'recalculado_progreso',
+      'tarea_iniciada',
+      'tarea_pausada',
+      'tarea_reanudada',
+      'tarea_finalizada',
+      'tarea_auto_finalizada',
+      'tarea_devuelta',
+      'tarea_reasignada',
+      'tiempo_estimado_tecnico_reasignacion'
+    ],
+    required: true
+  },
+  tiempoMinutos: {
+    type: Number,
+    default: 0
+  },
+  tiempoAnterior: {
+    type: Number,
+    default: 0
+  },
+  tiempoReal: {
+    type: Number,
+    default: 0
+  },
+  diferencia: {
+    type: Number,
+    default: 0
+  },
+  progreso: {
+    type: Number,
+    default: 0
+  },
+  tiempoTrabajado: {
+    type: Number,
+    default: 0
+  },
+  por: {
+    type: String,
+    default: 'Sistema'
+  },
+  rol: {
+    type: String,
+    enum: ['supervisor', 'tecnico', 'usuario', 'Sistema'],
+    default: 'Sistema'
+  },
+  motivo: {
+    type: String,
+    default: ''
+  },
+  eficiencia: {
+    type: String,
+    enum: ['mayor_a_esperado', 'esperado', 'menor_a_esperado', 'critico'],
+    default: 'esperado'
+  },
+  tiempoRestante: {
+    type: Number,
+    default: 0
+  },
+  tecnicoAnterior: {
+    type: String,
+    default: ''
+  },
+  tecnicoNuevo: {
+    type: String,
+    default: ''
+  },
+  alerta: {
+    type: Boolean,
+    default: false
+  }
+});
+
 const tarjetasSchema = new mongoose.Schema({
   titulo: {
     type: String,
@@ -100,6 +185,18 @@ const tarjetasSchema = new mongoose.Schema({
     default: 0
   },
   
+  // ============================================================
+  // 🔥 NUEVO: CONTROL DE TIEMPO PAUSADO
+  // ============================================================
+  tiempoPausadoTotal: {
+    type: Number,
+    default: 0  // minutos totales que la tarea ha estado pausada
+  },
+  fechaUltimaPausa: {
+    type: Date,
+    default: null  // momento en que se pausó por última vez
+  },
+  
   registroHoras: [registroHorasSchema],
   tolerancias: [toleranciaSchema],
   
@@ -128,6 +225,8 @@ const tarjetasSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  
+  logTiempos: [logTiempoSchema],
   
   fechaInicioReal: Date,
   fechaEstimadaFin: Date,
