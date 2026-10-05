@@ -28,7 +28,9 @@ const io = new Server(server, {
       'http://localhost:3000',
       'http://localhost:3001',
       'http://172.16.30.212:3000',
-      'http://172.16.30.212:3001'
+      'http://172.16.30.212:3001',
+      'http://10.0.0.32:3000',
+      'http://10.0.0.32:80'
     ],
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     credentials: true
