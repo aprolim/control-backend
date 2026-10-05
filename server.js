@@ -20,19 +20,34 @@ const app = express();
 const server = createServer(app);
 
 // ============================================================
+// CORS - Lista de orígenes permitidos
+// ============================================================
+const allowedOrigins = [
+  'http://localhost',
+  'http://localhost:80',
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'http://127.0.0.1',
+  'http://127.0.0.1:80',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
+  'http://172.16.30.212',
+  'http://172.16.30.212:80',
+  'http://172.16.30.212:3000',
+  'http://172.16.30.212:3001',
+  'http://10.0.0.32',
+  'http://10.0.0.32:80',
+  'http://10.0.0.32:3000',
+  'http://10.0.0.32:3001'
+];
+
+// ============================================================
 // SOCKET.IO CONFIGURACIÓN
 // ============================================================
 const io = new Server(server, {
   cors: {
-    origin: [
-      'http://localhost:3000',
-      'http://localhost:3001',
-      'http://172.16.30.212:3000',
-      'http://172.16.30.212:3001',
-      'http://10.0.0.32:3000',
-      'http://10.0.0.32:80'
-    ],
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    origin: allowedOrigins,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true
   },
   transports: ['websocket', 'polling']
@@ -40,15 +55,24 @@ const io = new Server(server, {
 
 app.set('trust proxy', 1);
 
+// ============================================================
+// EXPRESS CORS
+// ============================================================
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://172.16.30.212:3000',
-    'http://172.16.30.212:3001'
-  ],
-  credentials: true
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
+
+// 🔥 CRÍTICO: responder a preflight OPTIONS
+app.options('*', cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -122,7 +146,7 @@ io.on('connection', (socket) => {
     io.emit('tarea-tomada', data);
   });
   
-  // 🔥 NUEVO: Evento específico para actualizar el Kanban del supervisor
+  // 🔥 Evento específico para actualizar el Kanban del supervisor
   socket.on('kanban-actualizar', (data) => {
     console.log(`📋 [Socket] Kanban actualizar:`, data.mensaje);
     io.emit('kanban-actualizar', data);
@@ -297,6 +321,8 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`📍 Red:      http://${LOCAL_IP}:${PORT}`);
   console.log(`📍 Health:   http://${LOCAL_IP}:${PORT}/api/health`);
   console.log(`🔌 Socket:   ws://${LOCAL_IP}:${PORT}/socket.io`);
+  console.log('🌐 CORS:     Orígenes permitidos:');
+  allowedOrigins.forEach(origin => console.log(`              ✓ ${origin}`));
   console.log('========================================');
   
   iniciarAutoCierreService(io, clients);
