@@ -4,6 +4,8 @@ import User from '../models/User.js';
 
 // ============================================================
 // ALMACENAR TIMEOUTS POR TAREA
+// 🔥 La key SIEMPRE es string (tarjetaId.toString()) para
+//    evitar el bug de Mongoose con ObjectIds diferentes
 // ============================================================
 export const timeouts = new Map();
 
@@ -167,50 +169,43 @@ export const recalcularTiempoPorProgreso = async (tarjetaId, io, clients, coment
 
 // ============================================================
 // AUTO-FINALIZAR TAREA
-// 🔥 CAMBIO: ahora acepta un parámetro opcional `tiempoRealForzado`
-//    para congelar el tiempo real al momento de programar el auto-cierre.
-//    Esto evita que retrasos del event loop inflen el tiempo registrado.
 // ============================================================
 export const autoFinalizarTarea = async (tareaId, io, clients, tiempoRealForzado = null) => {
+  // 🔥 CLAVE: convertir a string para consistencia con el Map
+  const key = tareaId.toString();
+  
   try {
-    console.log(`🔥 [AUTO-CIERRE] Evento real para tarea: ${tareaId}`);
+    console.log(`🔥 [AUTO-CIERRE] Evento real para tarea: ${key}`);
     
-    const tarjeta = await Tarjeta.findById(tareaId).populate('asignadoA', 'nombre email');
+    const tarjeta = await Tarjeta.findById(key).populate('asignadoA', 'nombre email');
     
     if (!tarjeta) {
-      console.log(`❌ Tarea ${tareaId} no encontrada`);
-      timeouts.delete(tareaId);
+      console.log(`❌ Tarea ${key} no encontrada`);
+      timeouts.delete(key);
       return;
     }
     
     if (tarjeta.estado !== 'en_progreso') {
-      console.log(`⏭️ Tarea ${tareaId} ya no está en progreso (${tarjeta.estado})`);
-      timeouts.delete(tareaId);
+      console.log(`⏭️ Tarea ${key} ya no está en progreso (${tarjeta.estado})`);
+      timeouts.delete(key);
       return;
     }
     
     if (tarjeta.estadoProgreso !== 'activa') {
-      console.log(`⏭️ Tarea ${tareaId} está pausada, reprogramando...`);
-      const tiempoRestante = calcularTiempoRestante(tarjeta);
-      if (tiempoRestante > 0) {
-        programarAutoFinalizacion(tareaId, tiempoRestante, io, clients);
-      }
+      console.log(`⏭️ Tarea ${key} está pausada, cancelando auto-cierre`);
+      timeouts.delete(key);
       return;
     }
     
     // ============================================================
-    // 🔥 CALCULAR TIEMPO TOTAL TRABAJADO
+    // CALCULAR TIEMPO TOTAL TRABAJADO
     // ============================================================
     let tiempoTotalTrabajado;
     
     if (tiempoRealForzado !== null && tiempoRealForzado !== undefined) {
-      // 🔥 NUEVO: Usar el tiempo congelado al momento de programar el auto-cierre.
-      // Esto evita que retrasos del event loop inflen el tiempo registrado.
       tiempoTotalTrabajado = tiempoRealForzado;
       console.log(`   🔒 Usando tiempo CONGELADO: ${tiempoTotalTrabajado} min`);
-      console.log(`      (evita que retrasos del event loop inflen el tiempo)`);
     } else {
-      // Cálculo normal (para auto-finalizaciones forzadas manualmente)
       tiempoTotalTrabajado = tarjeta.tiempoAcumulado || 0;
       if (tarjeta.fechaUltimaReanudacion) {
         const ahora = new Date();
@@ -231,7 +226,7 @@ export const autoFinalizarTarea = async (tareaId, io, clients, tiempoRealForzado
     console.log(`   Diferencia: ${diferencia > 0 ? '+' : ''}${diferencia} min`);
     console.log(`   Eficiencia: ${eficiencia}`);
     
-    // 🔥 Finalizar directamente, sin pasar por revisión
+    // Finalizar directamente
     tarjeta.estado = 'finalizada';
     tarjeta.fechaCompletadaEmpleado = new Date();
     tarjeta.fechaFinalizada = new Date();
@@ -239,7 +234,6 @@ export const autoFinalizarTarea = async (tareaId, io, clients, tiempoRealForzado
     tarjeta.porcentajeCompletado = 100;
     tarjeta.tiempoAcumulado = tiempoTotalTrabajado;
     tarjeta.fechaUltimaPausa = null;
-    // 🔥 La calificación queda pendiente para que el cliente pueda calificar después (opcional)
     tarjeta.estadoCalificacion = 'pendiente';
     
     const horasReales = Math.floor(tiempoTotalTrabajado / 60);
@@ -300,7 +294,7 @@ export const autoFinalizarTarea = async (tareaId, io, clients, tiempoRealForzado
         mensaje: `Tarea "${tarjeta.titulo}" auto-finalizada`
       });
       
-      // 🔥 Notificar específicamente a supervisores para actualizar Kanban
+      // Notificar a supervisores
       const supervisores = await User.find({ rol: 'supervisor', activo: true }).select('_id');
       supervisores.forEach(sup => {
         const socketSup = clients.get(sup._id.toString());
@@ -315,61 +309,70 @@ export const autoFinalizarTarea = async (tareaId, io, clients, tiempoRealForzado
       });
     }
     
-    timeouts.delete(tareaId);
-    console.log(`✅ [AUTO-CIERRE] Tarea ${tareaId} finalizada exitosamente`);
+    timeouts.delete(key);
+    console.log(`✅ [AUTO-CIERRE] Tarea ${key} finalizada exitosamente`);
     
     return { success: true, tarjeta };
     
   } catch (error) {
     console.error('❌ [AUTO-CIERRE] Error:', error);
-    timeouts.delete(tareaId);
+    timeouts.delete(key);
     return { success: false, error: error.message };
   }
 };
 
 // ============================================================
 // PROGRAMAR AUTO-FINALIZACIÓN
-// 🔥 CAMBIO: ahora calcula y congela el tiempo real en el momento
-//    de programar, para que aunque el timer se retrase, el tiempo
-//    registrado sea exactamente el estimado.
+// 🔥 FIX: usar tarjetaId.toString() como key del Map para
+//    evitar que Mongoose ObjectIds diferentes no se encuentren
 // ============================================================
 export const programarAutoFinalizacion = (tarjetaId, tiempoMinutos, io, clients) => {
-  if (timeouts.has(tarjetaId)) {
-    clearTimeout(timeouts.get(tarjetaId));
-    timeouts.delete(tarjetaId);
+  // 🔥 CLAVE: convertir a string
+  const key = tarjetaId.toString();
+  
+  // Cancelar timer previo si existe
+  if (timeouts.has(key)) {
+    clearTimeout(timeouts.get(key));
+    timeouts.delete(key);
+    console.log(`⏹️ [Auto-cierre] Timer previo cancelado para tarea ${key}`);
   }
   
-  if (!tiempoMinutos || tiempoMinutos <= 0) return;
+  if (!tiempoMinutos || tiempoMinutos <= 0) {
+    console.log(`⏭️ [Auto-cierre] No se programa (tiempo=${tiempoMinutos}) para tarea ${key}`);
+    return;
+  }
   
-  // 🔥 Margen de 30 segundos para dar tiempo a que el técnico finalice manualmente
+  // Margen de 30 segundos
   const tiempoMs = (tiempoMinutos * 60 * 1000) + (30 * 1000);
   
-  console.log(`⏰ Programando auto-finalización para tarea ${tarjetaId} en ${tiempoMinutos} minutos`);
-  console.log(`   🔒 Tiempo real a registrar: ${tiempoMinutos} min (congelado)`);
+  console.log(`⏰ [Auto-cierre] Programando para tarea ${key} en ${tiempoMinutos} min (${(tiempoMs/60000).toFixed(1)} min reales)`);
   
   const timeoutId = setTimeout(async () => {
-    console.log(`🔥 [EVENTO] Timeout disparado para tarea ${tarjetaId}`);
-    console.log(`   🔒 Pasando tiempo congelado: ${tiempoMinutos} min`);
-    
-    // 🔥 NUEVO: Pasar el tiempo congelado (el estimado) para que
-    // autoFinalizarTarea lo use en lugar de recalcularlo.
-    // Esto evita que retrasos del event loop inflen el tiempo registrado.
-    await autoFinalizarTarea(tarjetaId, io, clients, tiempoMinutos);
+    console.log(`🔥 [Auto-cierre] Timer disparado para tarea ${key}`);
+    await autoFinalizarTarea(key, io, clients, tiempoMinutos);
   }, tiempoMs);
   
-  timeouts.set(tarjetaId, timeoutId);
+  timeouts.set(key, timeoutId);
+  console.log(`   📊 Total timers activos: ${timeouts.size}`);
 };
 
 // ============================================================
 // CANCELAR AUTO-FINALIZACIÓN
+// 🔥 FIX: usar tarjetaId.toString() como key del Map
 // ============================================================
 export const cancelarAutoFinalizacion = (tarjetaId) => {
-  if (timeouts.has(tarjetaId)) {
-    clearTimeout(timeouts.get(tarjetaId));
-    timeouts.delete(tarjetaId);
-    console.log(`⏹️ Auto-finalización cancelada para tarea ${tarjetaId}`);
+  // 🔥 CLAVE: convertir a string
+  const key = tarjetaId.toString();
+  
+  if (timeouts.has(key)) {
+    clearTimeout(timeouts.get(key));
+    timeouts.delete(key);
+    console.log(`⏹️ [Auto-cierre] Cancelado timer para tarea ${key}`);
+    console.log(`   📊 Total timers activos: ${timeouts.size}`);
     return true;
   }
+  
+  console.log(`⚠️ [Auto-cierre] No se encontró timer para tarea ${key}`);
   return false;
 };
 
@@ -402,12 +405,10 @@ export const verificarTareasActivas = async (io, clients) => {
       
       if (tiempoRestante <= 0) {
         console.log(`⚠️ Tarea ${tarjeta.titulo} ya excedió el tiempo, finalizando...`);
-        // 🔥 Para tareas que ya excedieron, usamos el tiempo estimado como congelado
-        // (no queremos que se registre tiempo extra por el retraso del servidor)
-        await autoFinalizarTarea(tarjeta._id, io, clients, tarjeta.tiempoEstimadoEmpleado);
+        await autoFinalizarTarea(tarjeta._id.toString(), io, clients, tarjeta.tiempoEstimadoEmpleado);
       } else {
         console.log(`⏰ Reprogramando tarea ${tarjeta.titulo}: ${tiempoRestante} min restantes`);
-        programarAutoFinalizacion(tarjeta._id, tiempoRestante, io, clients);
+        programarAutoFinalizacion(tarjeta._id.toString(), tiempoRestante, io, clients);
       }
     }
     
@@ -426,7 +427,8 @@ export const iniciarAutoCierreService = (io, clients) => {
   console.log(`   📡 io: ${io ? '✅ Disponible' : '❌ No disponible'}`);
   console.log(`   👥 clients: ${clients ? '✅ Disponible' : '❌ No disponible'}`);
   console.log(`   ⏱️ Usando setTimeout (eventos reales, no polling)`);
-  console.log(`   🔒 Tiempo real CONGELADO al programar (evita inflado por retrasos)`);
+  console.log(`   🔒 Tiempo real CONGELADO al programar`);
+  console.log(`   🔑 Keys del Map son STRINGS (fix ObjectId)`);
   
   setTimeout(() => {
     verificarTareasActivas(io, clients);

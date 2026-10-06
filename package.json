@@ -2,7 +2,7 @@
   "name": "control-personal-backend",
   "version": "1.0.0",
   "type": "module",
-  "description": "Backend para sistema de control de personal",
+  "description": "Backend para sistema de control de actividades del personal",
   "main": "server.js",
   "scripts": {
     "dev": "nodemon server.js",
